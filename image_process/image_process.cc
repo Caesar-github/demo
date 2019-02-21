@@ -32,8 +32,11 @@
 #include <gflags/gflags.h>
 
 #include <rga/RockchipRga.h>
+
+#if RKNNCASCADE
 #include <rknn_cascade/RknnCascade.h>
 #include <rknn_cascade/ssd.h>
+#endif
 
 #include "version.h"
 
@@ -1106,15 +1109,12 @@ void DummyLeaf::SubRun()
 #define MESA_EGL_NO_X11_HEADERS
 #include <SDL2/SDL_egl.h>
 #include <SDL2/SDL_opengles2.h>
-#ifndef SDL_GLES2FUNCS_H
-#error SDL_GLES2FUNCS_H is undefined
-#endif
 
 #define _STR(s) #s
 #define STR(s)  _STR(s)
 typedef struct GLES2_Context {
 #define SDL_PROC(ret,func,params) ret (APIENTRY *func) params;
-#include STR(SDL_GLES2FUNCS_H)
+#include "SDL_gles2funcs.h"
     SDL_PROC(void, glLineWidth, (GLfloat width))
     SDL_PROC(void, glDeleteBuffers, (GLsizei n, const GLuint *buffers))
     SDL_PROC(void, glUniform1f, (GLint location, GLfloat x))
@@ -1157,7 +1157,7 @@ static int LoadContext(GLES2_Context *data)
     } while ( 0 );
 #endif /* __SDL_NOGETPROCADDR__ */
 
-#include STR(SDL_GLES2FUNCS_H)
+#include "SDL_gles2funcs.h" //STR(SDL_GLES2FUNCS_H)
     SDL_PROC(void, glLineWidth, (GLfloat width))
     SDL_PROC(void, glDeleteBuffers, (GLsizei n, const GLuint * buffers))
     SDL_PROC(void, glUniform1f, (GLint location, GLfloat x))
@@ -2789,7 +2789,11 @@ void SDLDisplayLeaf::SubRun()
     int *mask = (int *)malloc(win_w * 96 * 4);
     GLuint mask_texture = 0;
     Rect mask_rect = { -win_w / 2, win_h / 2, (uint32_t)win_w, 96};
+#if RKNNCASCADE
     const char *title = " RK1808 4X SSD Demo";
+#else
+    const char *title = " Rockchip Image Process Demo";
+#endif
     SDLFont title_font(title_color, 48);
     GLuint title_texture = 0;
     int title_w = 0, title_h = 0;
@@ -3781,6 +3785,7 @@ void DRMDisplayLeaf::SubRun()
     clear_fb_id(dev.fd, jb_fb_map);
 }
 
+#if RKNNCASCADE
 class NpuUsbLeaf : public LeafHandler
 {
 public:
@@ -4003,6 +4008,7 @@ void output_processer(NpuOutPutLeaf *npl, int index, int device_id)
     }
     av_log(NULL, AV_LOG_INFO, "Output processer exit, device_id=%d\n", device_id);
 }
+#endif
 
 static void quit_program(const char *func, int line)
 {
@@ -4146,7 +4152,9 @@ int main(int argc, char **argv)
 
     std::vector<std::unique_ptr<Input>> input_vector;
     std::unique_ptr<Join> join(new Join(global_drm_fd));
+#if RKNNCASCADE
     std::shared_ptr<RK::RknnCascade> cascade;
+#endif
 
     if (FLAGS_join_round_buffer_num < 2)
         QUIT_PROGRAM();
@@ -4158,6 +4166,7 @@ int main(int argc, char **argv)
                        FLAGS_join_round_buffer_num))
         QUIT_PROGRAM();
 
+#if RKNNCASCADE
     // npu start is slow, load it first
     std::vector<int> device_ids;
     std::vector<std::pair<int, int>> offsets;
@@ -4223,7 +4232,7 @@ int main(int argc, char **argv)
             QUIT_PROGRAM();
         }
     }
-
+#endif
     av_register_all();
     avformat_network_init();
     while (std::getline(tokenStream, token, ' ')) {
@@ -4256,7 +4265,9 @@ int main(int argc, char **argv)
         if (sdlleaf) {
             sdl_font = new SDLFont(red, 24);
             sdlleaf->sdl_font = sdl_font;
+#if RKNNCASCADE
             sdlleaf->SetFaceSliceNum(device_ids.size());
+#endif
             leafs.push_back(sdlleaf);
             join->AddLeaf(sdlleaf);
             if (!sdlleaf->Prepare())
@@ -4264,6 +4275,7 @@ int main(int argc, char **argv)
         }
     }
 
+#if RKNNCASCADE
     LeafHandler *npu_output_leaf = nullptr;
     if (FLAGS_processor == "npu") {
         LeafHandler *npu_input_leaf = nullptr;
@@ -4293,7 +4305,7 @@ int main(int argc, char **argv)
                 QUIT_PROGRAM();
         }
     }
-
+#endif
     if (leafs.empty()) {
         DummyLeaf *leaf = new DummyLeaf();
         if (leaf) {
@@ -4312,8 +4324,10 @@ int main(int argc, char **argv)
         input->Start();
     }
 
+#if RKNNCASCADE
     if (npu_output_leaf)
         npu_output_leaf->Start();
+#endif
     join->Start();
     for (auto lh : leafs)
         lh->Start();
@@ -4341,6 +4355,7 @@ int main(int argc, char **argv)
         input->Stop();
     }
 
+#if RKNNCASCADE
     if (cascade) {
         av_log(NULL, AV_LOG_INFO, "close cascade\n");
         cascade->close();
@@ -4350,6 +4365,8 @@ int main(int argc, char **argv)
         npu_output_leaf->Stop();
         delete npu_output_leaf;
     }
+#endif
+
     for (auto lh : leafs)
         join->RemoveLeaf(lh);
     av_log(NULL, AV_LOG_INFO, "stop join\n");
@@ -4370,7 +4387,10 @@ int main(int argc, char **argv)
     drmClose(global_drm_fd);
     if (sdl_font)
         delete sdl_font;
+
+#if RKNNCASCADE
     cascade.reset();
+#endif
 
     av_log(NULL, AV_LOG_INFO, "exit main\n");
     return 0;
