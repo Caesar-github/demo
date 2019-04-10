@@ -12,6 +12,18 @@ set (CMAKE_CXX_STANDARD 11)
 # add_definitions(-fexceptions -finstrument-functions -funwind-tables -g -rdynamic -O0)
 add_definitions(-O2)
 
+if (DEFINED DRAW_BY_OPENGLES)
+	add_definitions(-DDRAW_BY_OPENGLES=${DRAW_BY_OPENGLES})
+endif()
+
+if (DEFINED DRAW_BY_SDL)
+	add_definitions(-DDRAW_BY_SDL=${DRAW_BY_SDL})
+endif()
+
+if (DEFINED DRAW_BY_DRM)
+	add_definitions(-DDRAW_BY_DRM=${DRAW_BY_DRM})
+endif()
+
 if (DEFINED SDL_GLES2FUNCS_H_DIR)
     add_definitions(-I${SDL_GLES2FUNCS_H_DIR})
 endif()

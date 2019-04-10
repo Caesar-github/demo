@@ -201,6 +201,16 @@ extern "C"
 #include <libavutil/hwcontext_drm.h>
 }
 
+static int get_drm_fmt(Format f)
+{
+    switch (f) {
+        case Format::NV12:  return DRM_FORMAT_NV12;
+        case Format::RGB:   return DRM_FORMAT_RGB888;
+        case Format::RGBX:  return DRM_FORMAT_XRGB8888;
+    }
+    return -1;
+}
+
 class Join;
 static void push_frame(Join *jn, int index, std::shared_ptr<AVFrame> f);
 static bool is_realtime(const char *name)
@@ -1099,10 +1109,15 @@ void DummyLeaf::SubRun()
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 
+#ifndef DRAW_BY_SDL
 #define DRAW_BY_SDL 0
+#endif
 #define SDL_RGA DRAW_BY_SDL
 
-#define DRAW_BY_OPENGLES 1
+#ifndef DRAW_BY_OPENGLES
+#define DRAW_BY_OPENGLES 0
+#endif
+// #define DRAW_BY_OPENGLES 1
 
 #if DRAW_BY_OPENGLES
 #include <libdrm/drm_fourcc.h>
@@ -1402,16 +1417,6 @@ static AVPixelFormat get_av_pixel_fmt(Format f)
     return AV_PIX_FMT_NONE;
 }
 
-static int get_drm_fmt(Format f)
-{
-    switch (f) {
-        case Format::NV12:  return DRM_FORMAT_NV12;
-        case Format::RGB:   return DRM_FORMAT_RGB888;
-        case Format::RGBX:  return DRM_FORMAT_XRGB8888;
-    }
-    return -1;
-}
-
 static bool opengl_read_limits(GLES2_Context &ctx, shader_data *data)
 {
     static const struct {
@@ -1676,9 +1681,10 @@ public:
     ~SDLFont();
     SDL_Surface *DrawString(char *str, int str_length);
     SDL_Surface *GetFontPicture(char *str, int str_length, int bpp, int *w, int *h);
+#if DRAW_BY_OPENGLES
     GLuint GetFontTexture(const GLES2_Context &ctx, char *str, int str_length,
                           int bpp, int *w, int *h);
-
+#endif
     SDL_Color fore_col;
     SDL_Color back_col;
     int renderstyle;
@@ -1803,6 +1809,7 @@ SDL_Surface *SDLFont::GetFontPicture(char *str, int str_length, int bpp,
     return image;
 }
 
+#if DRAW_BY_OPENGLES
 GLuint SDLFont::GetFontTexture(const GLES2_Context &ctx, char *str,
                                int str_length, int bpp, int *w, int *h)
 {
@@ -1837,6 +1844,7 @@ fail:
         SDL_FreeSurface(image);
     return 0;
 }
+#endif
 
 class NpuRect
 {
@@ -1963,8 +1971,6 @@ SDLDisplayLeaf::SDLDisplayLeaf(int drmfd) :
 {
     memset(&renderer_info, 0, sizeof(renderer_info));
     memset(&jb, 0, sizeof(jb));
-    font_vertex_buffer = 0;
-    memset(font_vertex, 0, sizeof(font_vertex));
     sdl_font = NULL;
 }
 #elif DRAW_BY_OPENGLES
@@ -1974,6 +1980,8 @@ SDLDisplayLeaf::SDLDisplayLeaf(int drmfd) :
     memset(&sd, 0, sizeof(sd));
     memset(&sd_line, 0, sizeof(sd_line));
     memset(&rgba_sd, 0, sizeof(rgba_sd));
+    font_vertex_buffer = 0;
+    memset(font_vertex, 0, sizeof(font_vertex));
     sdl_font = NULL;
 }
 #endif
@@ -2439,7 +2447,7 @@ void SDLDisplayLeaf::SDLDestroy()
     }
 
 #if SDL_RGA
-    FreeJoinBO(rga, &jb);
+    FreeJoinBO(drm_fd, rga, &jb);
 #endif
 
     SDL_Quit();
@@ -2542,7 +2550,7 @@ void SDLDisplayLeaf::SubRun()
                 break;
             }
             now2 = av_gettime_relative();
-            printf("RkRgaBlit consume: %lld ms\n", (now2 - now1) / 1000);
+            printf("RkRgaBlit consume: %d ms\n", (int)((now2 - now1) / 1000));
             now1 = now2;
             ret = SDL_UpdateTexture(texture, NULL, jb.bo.ptr, jb.width);
             if (ret) {
@@ -2551,17 +2559,17 @@ void SDLDisplayLeaf::SubRun()
                 break;
             }
             now2 = av_gettime_relative();
-            printf("UpdateTexture consume: %lld ms\n", (now2 - now1) / 1000);
+            printf("UpdateTexture consume: %d ms\n", (int)((now2 - now1) / 1000));
             now1 = now2;
             SDL_RenderCopyEx(renderer, texture, NULL, NULL, 0, NULL, SDL_FLIP_NONE);
             // SDL_RenderCopy(renderer, texture, NULL, NULL);
             now2 = av_gettime_relative();
-            printf("RenderCopy consume: %lld ms\n", (now2 - now1) / 1000);
+            printf("RenderCopy consume: %d ms\n", (int)((now2 - now1) / 1000));
             now1 = now2;
             SDL_RenderPresent(renderer);
             now2 = av_gettime_relative();
-            printf("RenderPresent consume: %lld ms\n", (now2 - now1) / 1000);
-            printf("renderer consume: %lld ms\n\n", (now2 - start_time) / 1000);
+            printf("RenderPresent consume: %d ms\n", (int)((now2 - now1) / 1000));
+            printf("renderer consume: %d ms\n\n", (int)((now2 - start_time) / 1000));
             SDL_PumpEvents();
         }
         if (event.type == SDL_QUIT)
@@ -3088,7 +3096,7 @@ class DRMDisplayLeaf : public LeafHandler
 
 public:
     DRMDisplayLeaf(int drmfd, const char *connector_key,
-                   const char *encoder_key, int width, int height);
+                   const char *encoder_key, int width, int height, uint32_t rotate = 0);
     virtual ~DRMDisplayLeaf();
 
     virtual bool Prepare() override;
@@ -3100,6 +3108,7 @@ public:
     char connector_name_key[16];
     char encoder_type_key[16];
     int scale_width, scale_height;
+    uint32_t scale_rotate;
     struct device dev;
     uint32_t plane_id;
     uint32_t crtc_id;
@@ -3412,7 +3421,6 @@ static bool add_fb(int fd, JoinBO *jb, uint32_t *fb_id)
 {
     static Format f = static_cast<Format>(FLAGS_format);
     static int drm_fmt = get_drm_fmt(f);
-    // shit: format endian EGL seems different from DRM
     int fourcc_fmt = drm_fmt;
 
     uint32_t handles[4] = {0}, pitches[4] = {0}, offsets[4] = {0};
@@ -3429,7 +3437,10 @@ static bool add_fb(int fd, JoinBO *jb, uint32_t *fb_id)
             handles[0] = jb->bo.handle;
             pitches[0] = jb->width * 3;
             offsets[0] = 0;
+#if DRAW_BY_OPENGLES
+            // shit: format endian EGL seems different from DRM
             fourcc_fmt = DRM_FORMAT_BGR888;
+#endif
             break;
         case DRM_FORMAT_XRGB8888:
             handles[0] = jb->bo.handle;
@@ -3458,8 +3469,9 @@ static void rm_fb(int fd, uint32_t &fb_id)
 
 DRMDisplayLeaf::DRMDisplayLeaf(int drmfd, const char *connector_key,
                                const char *encoder_key,
-                               int width, int height):
-    drm_fd(drmfd), scale_width(width), scale_height(height), waiting_for_flip(false)
+                               int width, int height, uint32_t rotate):
+    drm_fd(drmfd), scale_width(width), scale_height(height), scale_rotate(rotate),
+    waiting_for_flip(false)
 {
     if (connector_key)
         snprintf(connector_name_key, sizeof(connector_name_key), "%s", connector_key);
@@ -3572,6 +3584,10 @@ bool DRMDisplayLeaf::Prepare()
         drmModeModeInfoPtr first_mode = &dmc->modes[0];
         cur_mode = *first_mode;
     }
+
+    if (scale_rotate == 90 || scale_rotate == 270)
+        std::swap<int>(scale_width, scale_height);
+
     if (scale_width > cur_mode.hdisplay ||
         scale_height > cur_mode.vdisplay) {
         av_log(NULL, AV_LOG_WARNING, "Input width <%d> or height <%d>"
@@ -3589,7 +3605,7 @@ bool DRMDisplayLeaf::Prepare()
                              &cur_mode);
     if (ret)
         av_log(NULL, AV_LOG_WARNING, "Fail to drmModeSetCrtc, %d\n", ret);
-    if (scale_width > 0) {
+    if (scale_width > 0 || scale_rotate != 0) {
         for (int i = 0; i < 2; i++) {
             if (!AllocJoinBO(drm_fd, rga, &jbs[i], scale_width, scale_height))
                 return false;
@@ -3689,7 +3705,8 @@ static void clear_fb_id(int dmafd,
     }
 }
 
-static bool rga_blit_jb(RockchipRga &rga, JoinBO *src_jb, JoinBO *dst_jb)
+static bool rga_blit_jb(RockchipRga &rga, JoinBO *src_jb, JoinBO *dst_jb,
+                        int rotation = 0)
 {
     rga_info_t src, dst;
     static int format = get_rga_format(static_cast<Format>(FLAGS_format));
@@ -3697,6 +3714,7 @@ static bool rga_blit_jb(RockchipRga &rga, JoinBO *src_jb, JoinBO *dst_jb)
     memset(&src, 0, sizeof(src));
     src.fd = src_jb->fd;
     src.mmuFlag = 1;
+    src.rotation = rotation;
     rga_set_rect(&src.rect, 0, 0, src_jb->width, src_jb->height,
                  src_jb->width, src_jb->height, format);
 
@@ -3722,7 +3740,11 @@ void DRMDisplayLeaf::SubRun()
     int cur_jb_id = 0;
     bool do_rga_blit = (jbs[0].fd >= 0);
     // bool drm_ready = false;
+    int rotation = 0;
 
+    if (do_rga_blit && set_rga_ratation(scale_rotate, &rotation)) {
+        exit(-1);
+    }
     memset(&drm_evctx, 0, sizeof(drm_evctx));
     drm_evctx.version = DRM_EVENT_CONTEXT_VERSION;
     drm_evctx.page_flip_handler = drm_flip_handler;
@@ -3738,7 +3760,7 @@ void DRMDisplayLeaf::SubRun()
         if (!jb)
             continue;
         if (do_rga_blit) {
-            if (!rga_blit_jb(rga, jb, &jbs[render_jb_id]))
+            if (!rga_blit_jb(rga, jb, &jbs[render_jb_id], rotation))
                 continue;
         }
         if (!WaitPageFlip(1000)) {
@@ -4258,7 +4280,20 @@ int main(int argc, char **argv)
     std::list<LeafHandler *> leafs;
     SDLFont *sdl_font = nullptr;
     SDLDisplayLeaf *sdlleaf = nullptr;
+    DRMDisplayLeaf *drmleaf = nullptr;
     if (FLAGS_disp) {
+#if DRAW_BY_DRM && !RKNNCASCADE
+        drmleaf = new DRMDisplayLeaf(global_drm_fd, "DSI", "DSI", FLAGS_width,
+                                     FLAGS_height, FLAGS_disp_rotate);
+        if (!drmleaf)
+            QUIT_PROGRAM();
+        if (drmleaf) {
+            leafs.push_back(drmleaf);
+            join->AddLeaf(drmleaf);
+            if (!drmleaf->Prepare())
+                QUIT_PROGRAM();
+        }
+#else
         sdlleaf = new SDLDisplayLeaf(global_drm_fd);
         if (!sdlleaf)
             QUIT_PROGRAM();
@@ -4273,9 +4308,10 @@ int main(int argc, char **argv)
             if (!sdlleaf->Prepare())
                 QUIT_PROGRAM();
         }
+#endif
     }
 
-#if RKNNCASCADE
+#if RKNNCASCADE // DRAW_BY_OPENGLES
     LeafHandler *npu_output_leaf = nullptr;
     if (FLAGS_processor == "npu") {
         LeafHandler *npu_input_leaf = nullptr;
