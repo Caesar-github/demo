@@ -53,6 +53,7 @@
 enum class Format
 {
     NV12,
+    NV16,
     RGB,
     RGBX
 };
@@ -75,10 +76,14 @@ DEFINE_uint32(npu_piece_height, NPU_PIECE_HEIGHT,
               "piece height for npu input, default 300");
 DEFINE_string(npu_data_source, "drm", "npu input data source. [usb, drm]");
 DEFINE_string(npu_model_path, NPU_MODEL_PATH, "the path of mpu model");
+DEFINE_string(drm_conn_type, "DSI", "drm connector type. [DSI, CSI]");
+DEFINE_bool(drm_raw8_mode, false, "drm transfer with raw8");
 DEFINE_string(input, "", "input paths. separate each path by space.");
+DEFINE_int32(input_format, -1, "InputFormat: 0 nv12, 1 nv16, 2 rgb, 3 rgbx");
 DEFINE_uint32(width, WIDTH, "piece together width, default 4096");
 DEFINE_uint32(height, HEIGHT, "piece together height, default 2160");
-DEFINE_uint32(format, DEFAULT_JOIN_FORMAT, "OutFormat: 0 nv12, 1 rgb, 2 rgbx");
+DEFINE_uint32(format, DEFAULT_JOIN_FORMAT,
+              "OutFormat: 0 nv12, 1 nv16, 2 rgb, 3 rgbx");
 DEFINE_int32(slice_num, SLICE_NUM, "piece num, default 4");
 DEFINE_uint32(join_round_buffer_num, JOIN_ROUND_BUFFER_NUM,
               "round buffer num for join, default 4");
@@ -97,6 +102,7 @@ static int get_rga_format(Format f)
     static std::map<Format, int> rga_format_map;
     if (rga_format_map.empty()) {
         rga_format_map[Format::NV12] = RK_FORMAT_YCrCb_420_SP;
+        rga_format_map[Format::NV16] = RK_FORMAT_YCrCb_422_SP;
         rga_format_map[Format::RGB] = RK_FORMAT_RGB_888;
         rga_format_map[Format::RGBX] = RK_FORMAT_RGBX_8888;
     }
@@ -205,10 +211,22 @@ static int get_drm_fmt(Format f)
 {
     switch (f) {
         case Format::NV12:  return DRM_FORMAT_NV12;
+        case Format::NV16:  return DRM_FORMAT_NV16;
         case Format::RGB:   return DRM_FORMAT_RGB888;
         case Format::RGBX:  return DRM_FORMAT_XRGB8888;
     }
     return -1;
+}
+
+static int get_format_bits(Format f)
+{
+    switch (f) {
+        case Format::NV12:  return 12;
+        case Format::NV16:  return 16;
+        case Format::RGB:   return 24;
+        case Format::RGBX:  return 32;
+    }
+    return 0;
 }
 
 class Join;
@@ -217,7 +235,8 @@ static bool is_realtime(const char *name)
 {
     if (!strncmp(name, "rtp:", 4)
         || !strncmp(name, "rtsp:", 5)
-        || !strncmp(name, "sdp:", 4))
+        || !strncmp(name, "sdp:", 4)
+        || !strncmp(name, "/dev/video", 10))
         return true;
 
     return false;
@@ -644,6 +663,10 @@ bool Input::Stop()
     return true;
 }
 
+// class CameraInput : public Input {
+
+// };
+
 class spinlock_mutex
 {
     std::atomic_flag flag;
@@ -892,10 +915,12 @@ bool Join::Prepare(int w, int h, int slicenum, int buffernum)
     for (int i = 0; i < slice_num; i++) {
         Rect r;
         r.x = slice_w_end_gap + (slice_w + slice_w_gap) * (i % n);
-        if (FLAGS_format == static_cast<FormatType>(Format::NV12))
+        if (FLAGS_format == static_cast<FormatType>(Format::NV12) ||
+            FLAGS_format == static_cast<FormatType>(Format::NV16))
             r.x = (r.x + 1) & (~1);
         r.y = slice_h_end_gap + (slice_h + slice_h_gap) * (i / n);
-        if (FLAGS_format == static_cast<FormatType>(Format::NV12))
+        if (FLAGS_format == static_cast<FormatType>(Format::NV12) ||
+            FLAGS_format == static_cast<FormatType>(Format::NV16))
             r.y = (r.y + 1) & (~1);
         r.w = slice_w;
         r.h = slice_h;
@@ -1062,6 +1087,7 @@ static void get_format_rational(Format f, int &num, int &den)
 {
     switch (f) {
         case Format::NV12: num = 3; den = 2; break;
+        case Format::NV16: num = 2; den = 1; break;
         case Format::RGB: num = 3; den = 1; break;
         case Format::RGBX: num = 4; den = 1; break;
         default: num = 0; den = 1; return;
@@ -1411,6 +1437,7 @@ static AVPixelFormat get_av_pixel_fmt(Format f)
 {
     switch (f) {
         case Format::NV12:  return AV_PIX_FMT_NV12;
+        case Format::NV16:  return AV_PIX_FMT_NV16;
         case Format::RGB:   return AV_PIX_FMT_RGB24;
         case Format::RGBX:  return AV_PIX_FMT_RGBA;
     }
@@ -1993,9 +2020,9 @@ int SDLDisplayLeaf::get_texture_fmt(Format f)
     if (rga_format_map.empty()) {
         rga_format_map[Format::NV12] = SDL_PIXELFORMAT_NV12;
         rga_format_map[Format::RGB] =
-            SDL_PIXELFORMAT_NV12;     // SDL_PIXELFORMAT_RGB24;
+            SDL_PIXELFORMAT_RGB24;
         rga_format_map[Format::RGBX] =
-            SDL_PIXELFORMAT_NV12;    // SDL_PIXELFORMAT_RGBX8888;
+            SDL_PIXELFORMAT_RGBX8888;
     }
     auto it = rga_format_map.find(f);
     if (it != rga_format_map.end())
@@ -2950,6 +2977,27 @@ void SDLDisplayLeaf::SubRun()
 }
 #endif
 
+enum csi_path_mode {
+    VOP_PATH = 0,
+    BYPASS_PATH
+};
+
+enum vop_pdaf_mode {
+    VOP_HOLD_MODE = 0,
+    VOP_NORMAL_MODE,
+    VOP_PINGPONG_MODE,
+    VOP_BYPASS_MODE,
+    VOP_BACKGROUND_MODE,
+    VOP_ONEFRAME_MODE,
+    VOP_ONEFRAME_NOSEND_MODE
+};
+
+enum vop_pdaf_type {
+    VOP_PDAF_TYPE_DEFAULT = 0,
+    VOP_PDAF_TYPE_HBLANK,
+    VOP_PDAF_TYPE_VBLANK,
+};
+
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -3077,6 +3125,14 @@ class DRMDisplayLeaf : public LeafHandler
         struct resources *resources;
     };
 
+    struct property_arg {
+        uint32_t obj_id;
+        uint32_t obj_type;
+        char name[DRM_PROP_NAME_LEN + 1];
+        uint32_t prop_id;
+        uint64_t value;
+    };
+
     static void free_resources(struct resources *res);
     struct resources *get_resources(struct device *pdev);
 
@@ -3091,6 +3147,7 @@ class DRMDisplayLeaf : public LeafHandler
 
     static void store_saved_crtc(struct resources *res);
     static void restore_saved_crtc(int fd, struct resources *res);
+    void set_property(struct device *devi, struct property_arg *p);
 
     bool WaitPageFlip(int timeout);
 
@@ -3417,25 +3474,97 @@ void DRMDisplayLeaf::restore_saved_crtc(int fd, struct resources *res)
     }
 }
 
+void DRMDisplayLeaf::set_property(struct device *devi, struct property_arg *p)
+{
+    drmModeObjectProperties *props = NULL;
+    drmModePropertyRes **props_info = NULL;
+    const char *obj_type;
+    int ret;
+    int i;
+
+    p->obj_type = 0;
+    p->prop_id = 0;
+
+#define find_object(_res, __res, type, Type)                    \
+    do {                                    \
+        for (i = 0; i < (int)(_res)->__res->count_##type##s; ++i) { \
+            struct type *obj = &(_res)->type##s[i];         \
+            if (obj->type->type##_id != p->obj_id)          \
+                continue;                   \
+            p->obj_type = DRM_MODE_OBJECT_##Type;           \
+            obj_type = #Type;                   \
+            props = obj->props;                 \
+            props_info = obj->props_info;               \
+        }                               \
+    } while(0)
+
+    find_object(devi->resources, res, crtc, CRTC);
+    if (p->obj_type == 0)
+        find_object(devi->resources, res, connector, CONNECTOR);
+    if (p->obj_type == 0)
+        find_object(devi->resources, plane_res, plane, PLANE);
+    if (p->obj_type == 0) {
+        fprintf(stderr, "Object %i not found, can't set property\n",
+                p->obj_id);
+        return;
+    }
+
+    if (!props) {
+        fprintf(stderr, "%s %i has no properties\n",
+                obj_type, p->obj_id);
+        return;
+    }
+
+    for (i = 0; i < (int)props->count_props; ++i) {
+        if (!props_info[i])
+            continue;
+        if (strcmp(props_info[i]->name, p->name) == 0)
+            break;
+    }
+
+    if (i == (int)props->count_props) {
+        fprintf(stderr, "%s %i has no %s property\n",
+                obj_type, p->obj_id, p->name);
+        return;
+    }
+
+    p->prop_id = props->props[i];
+
+    ret = drmModeObjectSetProperty(devi->fd, p->obj_id, p->obj_type,
+                                   p->prop_id, p->value);
+    if (ret < 0)
+        fprintf(stderr, "failed to set %s %i property %s to %" PRIu64 ": %s\n",
+                obj_type, p->obj_id, p->name, p->value, strerror(errno));
+}
+
 static bool add_fb(int fd, JoinBO *jb, uint32_t *fb_id)
 {
     static Format f = static_cast<Format>(FLAGS_format);
     static int drm_fmt = get_drm_fmt(f);
     int fourcc_fmt = drm_fmt;
+    int width = jb->width;
+    int height = jb->height;
 
     uint32_t handles[4] = {0}, pitches[4] = {0}, offsets[4] = {0};
+
+    if (FLAGS_drm_raw8_mode) {
+        fourcc_fmt = drm_fmt = DRM_FORMAT_RGB332;
+        width = jb->width * get_format_bits(f) / 8;
+    }
+
     switch (drm_fmt) {
         case DRM_FORMAT_NV12:
+        case DRM_FORMAT_NV16:
             handles[0] = jb->bo.handle;
-            pitches[0] = jb->width;
+            pitches[0] = width;
             offsets[0] = 0;
             handles[1] = jb->bo.handle;
             pitches[1] = pitches[0];
-            offsets[1] = pitches[0] * jb->width;
+            offsets[1] = pitches[0] * height;
             break;
         case DRM_FORMAT_RGB888:
             handles[0] = jb->bo.handle;
-            pitches[0] = jb->width * 3;
+            pitches[0] = width * 3;
             offsets[0] = 0;
 #if DRAW_BY_OPENGLES
             // shit: format endian EGL seems different from DRM
@@ -3444,16 +3573,27 @@ static bool add_fb(int fd, JoinBO *jb, uint32_t *fb_id)
             break;
         case DRM_FORMAT_XRGB8888:
             handles[0] = jb->bo.handle;
-            pitches[0] = jb->width * 4;
+            pitches[0] = width * 4;
+            offsets[0] = 0;
+            break;
+        case DRM_FORMAT_RGB332:
+            handles[0] = jb->bo.handle;
+            pitches[0] = width;
             offsets[0] = 0;
             break;
         default:
+            av_log(NULL, AV_LOG_FATAL, "unknown drm format %d\n", drm_fmt);
             return false;
     }
-    int ret = drmModeAddFB2(fd, jb->width, jb->height, fourcc_fmt,
+
+    int ret = drmModeAddFB2(fd, width, height, fourcc_fmt,
                             handles, pitches, offsets, fb_id, 0);
     if (ret) {
         av_log(NULL, AV_LOG_FATAL, "drmModeAddFB2 failed, %m\n");
+        av_log(NULL, AV_LOG_FATAL, "width=%d height=%d fourcc=%c%c%c%c handle=%d\n",
+               width, height, (fourcc_fmt >> 24) & 0xFF,
+               (fourcc_fmt >> 16) & 0xFF, (fourcc_fmt >> 8) & 0xFF, fourcc_fmt & 0xFF,
+               jb->bo.handle);
         return false;
     }
     return true;
@@ -3517,6 +3657,14 @@ DRMDisplayLeaf::~DRMDisplayLeaf()
 
 bool DRMDisplayLeaf::Prepare()
 {
+    if (drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1)) {
+        av_log(NULL, AV_LOG_FATAL, "Failed to set universal planes cap %m\n");
+        return false;
+    }
+    if (drmSetClientCap(drm_fd, DRM_CLIENT_CAP_ATOMIC, 1)) {
+        av_log(NULL, AV_LOG_FATAL, "Failed set drm atomic cap %m\n");
+        return false;
+    }
     // get drm infomation
     dev.fd = drm_fd;
     dev.resources = get_resources(&dev);
@@ -3584,6 +3732,27 @@ bool DRMDisplayLeaf::Prepare()
         drmModeModeInfoPtr first_mode = &dmc->modes[0];
         cur_mode = *first_mode;
     }
+    if (FLAGS_drm_raw8_mode) {
+        int pdaf_work_mode = VOP_NORMAL_MODE;
+        int pdaf_type = VOP_PDAF_TYPE_VBLANK;
+        int vop_csi_path = VOP_PATH;
+        struct property_arg p;
+        memset(&p, 0, sizeof(p));
+        p.obj_id = crtc_id;
+        snprintf(p.name, sizeof(p.name), "WORK_MODE");
+        p.value = pdaf_work_mode;
+        set_property(&dev, &p);
+        memset(&p, 0, sizeof(p));
+        p.obj_id = crtc_id;
+        snprintf(p.name, sizeof(p.name), "PDAF_TYPE");
+        p.value = pdaf_type;
+        set_property(&dev, &p);
+        memset(&p, 0, sizeof(p));
+        p.obj_id = conn_id;
+        snprintf(p.name, sizeof(p.name), "CSI-TX-PATH");
+        p.value = vop_csi_path;
+        set_property(&dev, &p);
+    }
 
     if (scale_rotate == 90 || scale_rotate == 270)
         std::swap<int>(scale_width, scale_height);
@@ -3595,16 +3764,28 @@ bool DRMDisplayLeaf::Prepare()
                scale_width, scale_height, cur_mode.hdisplay, cur_mode.vdisplay);
     }
     av_assert0(cur_mode.hdisplay > 0 && cur_mode.vdisplay > 0);
-    av_log(NULL, AV_LOG_INFO, "mode <%d> x <%d>\n", cur_mode.hdisplay,
-           cur_mode.vdisplay);
-    if (!AllocJoinBO(drm_fd, rga, &crtc_jb, cur_mode.hdisplay, cur_mode.vdisplay))
-        return false;
+    av_log(NULL, AV_LOG_INFO, "mode <%d> x <%d>, scale <%d> x <%d>\n",
+           cur_mode.hdisplay,
+           cur_mode.vdisplay, scale_width, scale_height);
+
+    if (FLAGS_drm_raw8_mode) {
+        Format f = static_cast<Format>(FLAGS_format);
+        if (!AllocJoinBO(drm_fd, rga, &crtc_jb,
+                         cur_mode.hdisplay * 8 / get_format_bits(f), cur_mode.vdisplay))
+            return false;
+    } else {
+        if (!AllocJoinBO(drm_fd, rga, &crtc_jb, cur_mode.hdisplay, cur_mode.vdisplay))
+            return false;
+    }
+
     if (!add_fb(drm_fd, &crtc_jb, &crtc_fb_id))
         return false;
     int ret = drmModeSetCrtc(dev.fd, crtc_id, crtc_fb_id, 0, 0, &conn_id, 1,
                              &cur_mode);
-    if (ret)
+    if (ret) {
         av_log(NULL, AV_LOG_WARNING, "Fail to drmModeSetCrtc, %d\n", ret);
+        return false;
+    }
     if (scale_width > 0 || scale_rotate != 0) {
         for (int i = 0; i < 2; i++) {
             if (!AllocJoinBO(drm_fd, rga, &jbs[i], scale_width, scale_height))
@@ -3750,8 +3931,6 @@ void DRMDisplayLeaf::SubRun()
     drm_evctx.page_flip_handler = drm_flip_handler;
     store_saved_crtc(dev.resources);
 
-    drmSetClientCap(dev.fd, DRM_CLIENT_CAP_ATOMIC, 1);
-
     while (!req_exit_) {
         int ret;
         int render_jb_id = (cur_jb_id + 1) % 2;
@@ -3763,6 +3942,7 @@ void DRMDisplayLeaf::SubRun()
             if (!rga_blit_jb(rga, jb, &jbs[render_jb_id], rotation))
                 continue;
         }
+        // !FLAGS_drm_raw8_mode &&
         if (!WaitPageFlip(1000)) {
             continue;
         }
@@ -3781,9 +3961,13 @@ void DRMDisplayLeaf::SubRun()
         //        render_fb_id, render_fb.second,
         //        render_jb->width, render_jb->height);
         if (!render_fb.second) {
+            static Format f = static_cast<Format>(FLAGS_format);
+            int w = FLAGS_drm_raw8_mode ?
+                    render_jb->width * 8 / get_format_bits(f) :
+                    render_jb->width;
             ret = drmModeSetPlane(dev.fd, plane_id, crtc_id, render_fb_id, 0,
-                                  0, 0, render_jb->width, render_jb->height,
-                                  0, 0, render_jb->width << 16, render_jb->height << 16);
+                                  0, 0, w, render_jb->height,
+                                  0, 0, w << 16, render_jb->height << 16);
             if (ret)
                 av_log(NULL, AV_LOG_FATAL, "drmModeSetPlane failed, %m\n");
             render_fb.second = (ret == 0);
@@ -3791,6 +3975,7 @@ void DRMDisplayLeaf::SubRun()
         if (!render_fb.second)
             continue;
         // cur_jb_id = render_jb_id;
+        // printf("drmModePageFlip fb id = %d\n", render_fb_id);
         //!! drmModeSetPlane work some problems with drmModePageFlip
         ret = drmModePageFlip(dev.fd, crtc_id, render_fb_id,
                               DRM_MODE_PAGE_FLIP_EVENT, &waiting_for_flip);
@@ -4281,10 +4466,11 @@ int main(int argc, char **argv)
     SDLFont *sdl_font = nullptr;
     SDLDisplayLeaf *sdlleaf = nullptr;
     DRMDisplayLeaf *drmleaf = nullptr;
+    const char *drm_conn_type = FLAGS_drm_conn_type.c_str();
     if (FLAGS_disp) {
 #if DRAW_BY_DRM && !RKNNCASCADE
-        drmleaf = new DRMDisplayLeaf(global_drm_fd, "DSI", "DSI", FLAGS_width,
-                                     FLAGS_height, FLAGS_disp_rotate);
+        drmleaf = new DRMDisplayLeaf(global_drm_fd, drm_conn_type, drm_conn_type,
+                                     FLAGS_width, FLAGS_height, FLAGS_disp_rotate);
         if (!drmleaf)
             QUIT_PROGRAM();
         if (drmleaf) {
