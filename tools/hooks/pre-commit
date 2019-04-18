@@ -4,10 +4,10 @@ out_file="./fmt_df.txt"
 cur_dir=$(pwd)
 script_dir=tools/
 
-echo "[git-hook]: before commit, format code use astyle.sh ..."
+echo "[git-hook]: before commit, format code use clang-format.sh ..."
 
 cd $script_dir
-./astyle.sh
+./clang-format.sh
 
 cd $cur_dir
 
