@@ -55,7 +55,8 @@ enum class Format
     NV12,
     NV16,
     RGB,
-    RGBX
+    RGBX,
+    YUYV
 };
 typedef std::underlying_type<Format>::type FormatType;
 #define DEFAULT_JOIN_FORMAT static_cast<FormatType>(Format::RGB)
@@ -79,7 +80,8 @@ DEFINE_string(npu_model_path, NPU_MODEL_PATH, "the path of mpu model");
 DEFINE_string(drm_conn_type, "DSI", "drm connector type. [DSI, CSI]");
 DEFINE_bool(drm_raw8_mode, false, "drm transfer with raw8");
 DEFINE_string(input, "", "input paths. separate each path by space.");
-DEFINE_int32(input_format, -1, "InputFormat: 0 nv12, 1 nv16, 2 rgb, 3 rgbx");
+DEFINE_int32(input_format, -1,
+             "InputFormat: 0 nv12, 1 nv16, 2 rgb, 3 rgbx, 4 yuyv");
 DEFINE_uint32(width, WIDTH, "piece together width, default 4096");
 DEFINE_uint32(height, HEIGHT, "piece together height, default 2160");
 DEFINE_uint32(format, DEFAULT_JOIN_FORMAT,
@@ -212,17 +214,41 @@ static int get_drm_fmt(Format f)
     switch (f) {
         case Format::NV12:  return DRM_FORMAT_NV12;
         case Format::NV16:  return DRM_FORMAT_NV16;
+        case Format::YUYV:  return DRM_FORMAT_YUYV;
         case Format::RGB:   return DRM_FORMAT_RGB888;
         case Format::RGBX:  return DRM_FORMAT_XRGB8888;
     }
     return -1;
 }
 
+static int get_rga_format_bydrmfmt(uint32_t drm_fmt)
+{
+    switch (drm_fmt) {
+        case DRM_FORMAT_NV12: return RK_FORMAT_YCrCb_420_SP;
+        case DRM_FORMAT_NV16: return RK_FORMAT_YCrCb_422_SP;
+        case DRM_FORMAT_YUYV: return -1;
+    }
+    return -1;
+}
+
+static Format get_format_bydrmfmt(uint32_t drm_fmt)
+{
+    switch (drm_fmt) {
+        case DRM_FORMAT_NV12: return Format::NV12;
+        case DRM_FORMAT_NV16: return Format::NV16;
+        case DRM_FORMAT_YUYV: return Format::YUYV;
+        default: break;
+    }
+    return static_cast<Format>(-1);
+}
+
 static int get_format_bits(Format f)
 {
     switch (f) {
         case Format::NV12:  return 12;
-        case Format::NV16:  return 16;
+        case Format::NV16:
+        case Format::YUYV:
+            return 16;
         case Format::RGB:   return 24;
         case Format::RGBX:  return 32;
     }
@@ -245,7 +271,7 @@ class Input : public Handler
 {
 public:
     Input(std::string path);
-    ~Input();
+    virtual ~Input();
     void set_slice_index(int index) {
         slice_idx = index;
     }
@@ -663,10 +689,6 @@ bool Input::Stop()
     return true;
 }
 
-// class CameraInput : public Input {
-
-// };
-
 class spinlock_mutex
 {
     std::atomic_flag flag;
@@ -736,6 +758,314 @@ static void FreeJoinBO(int drmfd, RockchipRga &rga, JoinBO *jb)
     if (jb->fd >= 0) {
         close(jb->fd);
         jb->fd = -1;
+    }
+}
+
+#include <assert.h>
+#include <sys/ioctl.h>
+#include <linux/videodev2.h>
+
+static uint32_t get_v4l2_fmt(Format f)
+{
+    switch (f) {
+        case Format::NV12:  return V4L2_PIX_FMT_NV12;
+        case Format::NV16:  return V4L2_PIX_FMT_NV16;
+        case Format::YUYV:  return V4L2_PIX_FMT_YUYV;
+        default: break;
+    }
+    return 0;
+}
+
+class CameraInput : public Input
+{
+public:
+    CameraInput(int drmfd, std::string path);
+    virtual ~CameraInput();
+    virtual bool Prepare() override;
+    virtual void Run() override;
+    virtual bool Stop() override;
+
+    void enqueue_buffer(struct v4l2_buffer *buf);
+
+    RockchipRga rga;
+    int drm_fd;
+    int fd; // camera fd
+    std::atomic_int buffers_queued;
+    std::vector<JoinBO *> buffer_list;
+    int width, height;
+    size_t buffer_length;
+};
+
+struct buff_data {
+    CameraInput *s;
+    int index;
+};
+
+#define DUMP_FOURCC(f) (f >> 24) & 0xFF, (f >> 16) & 0xFF, (f >> 8) & 0xFF, f & 0xFF
+
+#define v4l2_open   open
+#define v4l2_close  close
+#define v4l2_dup    dup
+#define v4l2_ioctl  ioctl
+#define v4l2_read   read
+#define v4l2_mmap   mmap
+#define v4l2_munmap munmap
+
+CameraInput::CameraInput(int drmfd, std::string path):
+    Input(path), drm_fd(drmfd), fd (-1), buffers_queued(0),
+    width(1280), height(720), buffer_length(0) {}
+
+CameraInput::~CameraInput()
+{
+    for (JoinBO * jb : buffer_list) {
+        FreeJoinBO(drm_fd, rga, jb);
+        delete jb;
+    }
+    if (fd >= 0)
+        close(fd);
+}
+
+bool CameraInput::Stop()
+{
+    bool ret = Input::Stop();
+    for (auto frm : vfrm_list)
+        av_frame_free(&frm);
+    vfrm_list.clear();
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (fd >= 0)
+        v4l2_ioctl(fd, VIDIOC_STREAMOFF, &type);
+    return ret;
+}
+
+static void release_av_frame(void *opaque, uint8_t *data)
+{
+    struct v4l2_buffer buf;
+    memset(&buf, 0, sizeof(buf));
+    AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor *)data;
+    struct buff_data *bd = (struct buff_data *)opaque;
+    CameraInput *s = bd->s;
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_DMABUF;
+    buf.index = bd->index;
+    av_free(desc);
+    av_free(bd);
+    JoinBO *jb = s->buffer_list[buf.index];
+    buf.m.fd = jb->fd;
+    buf.length = s->buffer_length;
+    s->enqueue_buffer(&buf);
+}
+
+void CameraInput::enqueue_buffer(struct v4l2_buffer *buf)
+{
+    if (v4l2_ioctl(fd, VIDIOC_QBUF, buf) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "%s, ioctl(VIDIOC_QBUF): %m\n", path_.c_str());
+    } else {
+        buffers_queued.fetch_add(1);
+    }
+}
+
+bool CameraInput::Prepare()
+{
+    int w = width;
+    int h = height;
+    const char *device = path_.c_str();
+    struct v4l2_capability cap;
+    Format f = static_cast<Format>(FLAGS_input_format);
+    struct v4l2_format fmt;
+    struct v4l2_requestbuffers req;
+    struct v4l2_streamparm setfps;
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+    fd = v4l2_open(device, O_RDWR, 0);
+    if (fd < 0) {
+        av_log(NULL, AV_LOG_ERROR, "open %s failed %m\n", device);
+        goto fail;
+    }
+    if (v4l2_ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Failed to ioctl(VIDIOC_QUERYCAP): %m\n");
+        goto fail;
+    }
+    if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
+        av_log(NULL, AV_LOG_ERROR, "%s, Not a video capture device.\n", device);
+        goto fail;
+    }
+    if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
+        av_log(NULL, AV_LOG_ERROR,
+               "%s does not support the streaming I/O method.\n", device);
+        goto fail;
+    }
+
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.type = type;
+    fmt.fmt.pix.width = w;
+    fmt.fmt.pix.height = h;
+    fmt.fmt.pix.pixelformat = get_v4l2_fmt(f);
+    fmt.fmt.pix.field = V4L2_FIELD_ANY;
+
+    if (fmt.fmt.pix.pixelformat == 0) {
+        av_log(NULL, AV_LOG_ERROR, "unsupport input format : %d\n", FLAGS_input_format);
+        goto fail;
+    }
+    if (v4l2_ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "%s, s fmt failed, %m\n", device);
+        goto fail;
+    }
+
+    if (w != (int)fmt.fmt.pix.width || h != (int)fmt.fmt.pix.height) {
+        av_log(NULL, AV_LOG_WARNING, "%s change res from %dx%d to %dx%d\n", device, w,
+               h, fmt.fmt.pix.width, fmt.fmt.pix.height);
+        w = width = fmt.fmt.pix.width;
+        h = height = fmt.fmt.pix.height;
+    }
+    if (get_v4l2_fmt(f) != fmt.fmt.pix.pixelformat) {
+        av_log(NULL, AV_LOG_ERROR, "%s, expect %d, return %c%c%c%c\n",
+               device, FLAGS_input_format, DUMP_FOURCC(fmt.fmt.pix.pixelformat));
+        goto fail;
+    }
+
+    // FLAGS_input_format = 1;
+
+    if (fmt.fmt.pix.field == V4L2_FIELD_INTERLACED)
+        av_log(NULL, AV_LOG_INFO, "%s is using the interlaced mode\n", device);
+
+    memset(&setfps, 0, sizeof(setfps));
+    setfps.type = type;
+    setfps.parm.capture.timeperframe.denominator = 30;
+    setfps.parm.capture.timeperframe.numerator = 1;
+    if (v4l2_ioctl(fd, VIDIOC_S_PARM, &setfps) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "%s, s parm fps failed, %m\n", device);
+        goto fail;
+    }
+    fps = (double)setfps.parm.capture.timeperframe.denominator /
+          setfps.parm.capture.timeperframe.numerator;
+
+    memset(&req, 0, sizeof(req));
+    req.type   = type;
+    req.count  = 4;
+    req.memory = V4L2_MEMORY_DMABUF;
+
+    if (v4l2_ioctl(fd, VIDIOC_REQBUFS, &req) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "%s, ioctl(VIDIOC_REQBUFS): %m\n", device);
+        goto fail;
+    }
+    assert(req.count == 4);
+    w = (w + 15) & (~15);
+    h = (h + 15) & (~15);
+    buffer_length = w * h * get_format_bits(f) / 8;
+    for (size_t i = 0; i < req.count; i++) {
+        JoinBO *jb = new JoinBO();
+        assert(jb); // as only demo, do not set detail error log
+        if (!AllocJoinBO(drm_fd, rga, jb, w, h))
+            assert(0); // no memory
+        buffer_list.push_back(jb);
+    }
+
+    // stream on
+    for (size_t i = 0; i < req.count; i++) {
+        struct v4l2_buffer buf;
+        memset(&buf, 0, sizeof(buf));
+        buf.type   = type;
+        buf.index  = i;
+        buf.memory = V4L2_MEMORY_DMABUF;
+
+        JoinBO *jb = buffer_list[i];
+        buf.m.fd = jb->fd;
+        buf.length = buffer_length;
+        if (v4l2_ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+            av_log(NULL, AV_LOG_ERROR, "%s ioctl(VIDIOC_QBUF): %m\n",
+                   device);
+            goto fail;
+        }
+    }
+    buffers_queued = req.count;
+
+    if (v4l2_ioctl(fd, VIDIOC_STREAMON, &type) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "%s, ioctl(VIDIOC_STREAMON): %m\n",
+               device);
+        goto fail;
+    }
+
+    disp_thread = new std::thread(disp_loop, this);
+    if (!disp_thread)
+        goto fail;
+
+    if (!Handler::Prepare())
+        goto fail;
+    return true;
+
+fail:
+    Stop();
+    return false;
+}
+
+void CameraInput::Run()
+{
+    const char *device = path_.c_str();
+    Handler::Run();
+    while (!req_exit_) {
+        int res;
+        struct timeval buf_ts;
+        struct v4l2_buffer buf;
+
+        memset(&buf, 0, sizeof(buf));
+        buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_DMABUF;
+
+        while ((res = v4l2_ioctl(fd, VIDIOC_DQBUF, &buf)) < 0 && (errno == EINTR));
+        if (res < 0) {
+            if (errno == EAGAIN)
+                continue;
+            av_log(NULL, AV_LOG_ERROR, "%s, ioctl(VIDIOC_DQBUF): %m\n",
+                   device);
+            break;
+        }
+        assert(buf.index < 4);
+        buf_ts = buf.timestamp;
+        int queued_num = buffers_queued.fetch_add(-1);
+        if (queued_num < 0)
+            av_log(NULL, AV_LOG_WARNING, "%s, dqbuf faster than qbuf\n", device);
+        struct buff_data *buf_descriptor = (struct buff_data *)av_malloc(sizeof(
+                                                                             struct buff_data));
+        AVFrame *frame = av_frame_alloc();
+        if (!buf_descriptor || !frame) {
+            enqueue_buffer(&buf);
+            av_frame_free(&frame);
+            av_freep(&buf_descriptor);
+            continue;
+        }
+        buf_descriptor->index = buf.index;
+        buf_descriptor->s = this;
+
+        JoinBO *jb = buffer_list[buf.index];
+        static Format f = static_cast<Format>(FLAGS_input_format);
+        frame->format = AV_PIX_FMT_DRM_PRIME;
+        frame->width  = width;
+        frame->height = height;
+        frame->pts = buf_ts.tv_sec * 1000000LL + buf_ts.tv_usec;
+        AVDRMFrameDescriptor *
+        desc = (AVDRMFrameDescriptor *)av_mallocz(sizeof(AVDRMFrameDescriptor));
+        assert(desc);
+        desc->nb_objects = 1;
+        desc->objects[0].fd = jb->fd;
+        desc->objects[0].ptr = jb->bo.ptr;
+        desc->objects[0].size = buffer_length;
+        desc->nb_layers = 1;
+        AVDRMLayerDescriptor *layer = &desc->layers[0];
+        layer->format = get_drm_fmt(f);
+        layer->nb_planes = 2;
+
+        layer->planes[0].object_index = 0;
+        layer->planes[0].offset = 0;
+        layer->planes[0].pitch = width * 1;
+        layer->planes[1].object_index = 0;
+        layer->planes[1].offset = layer->planes[0].pitch * height;
+        layer->planes[1].pitch = layer->planes[0].pitch;
+        frame->data[0]  = (uint8_t *)desc;
+        frame->buf[0]   = av_buffer_create((uint8_t *)desc, sizeof(*desc),
+                                           release_av_frame, buf_descriptor, AV_BUFFER_FLAG_READONLY);
+        assert(frame->buf[0]);
+
+        PushFrame(frame);
     }
 }
 
@@ -916,11 +1246,13 @@ bool Join::Prepare(int w, int h, int slicenum, int buffernum)
         Rect r;
         r.x = slice_w_end_gap + (slice_w + slice_w_gap) * (i % n);
         if (FLAGS_format == static_cast<FormatType>(Format::NV12) ||
-            FLAGS_format == static_cast<FormatType>(Format::NV16))
+            FLAGS_format == static_cast<FormatType>(Format::NV16) ||
+            FLAGS_format == static_cast<FormatType>(Format::YUYV))
             r.x = (r.x + 1) & (~1);
         r.y = slice_h_end_gap + (slice_h + slice_h_gap) * (i / n);
         if (FLAGS_format == static_cast<FormatType>(Format::NV12) ||
-            FLAGS_format == static_cast<FormatType>(Format::NV16))
+            FLAGS_format == static_cast<FormatType>(Format::NV16) ||
+            FLAGS_format == static_cast<FormatType>(Format::YUYV))
             r.y = (r.y + 1) & (~1);
         r.w = slice_w;
         r.h = slice_h;
@@ -1059,18 +1391,35 @@ bool Join::scale_frame_to(AVFrame *av_frame, JoinBO *jb, int index)
     rga_info_t src, dst;
     int ret;
 
+    Rect &dts_rect = slice_rect[index];
+
+    int src_format = get_rga_format_bydrmfmt(layer->format);
+    if (src_format < 0 && desc->nb_layers == 1 &&
+        (get_format_bits(static_cast<Format>(FLAGS_format)) ==
+         get_format_bits(get_format_bydrmfmt(layer->format))) &&
+        (av_frame->width == (int)dts_rect.w) &&
+        (av_frame->height == (int)dts_rect.h)
+       ) {
+        // just do copy
+        src_format = dst_format;
+    }
+    if (src_format < 0) {
+        av_log(NULL, AV_LOG_FATAL, "rga do not support format : %c%c%c%c\n",
+               DUMP_FOURCC(layer->format));
+        abort();
+    }
     memset(&src, 0, sizeof(src));
     src.fd = desc->objects[0].fd;
     src.mmuFlag = 1;
     rga_set_rect(&src.rect, 0, 0, av_frame->width, av_frame->height,
                  layer->planes[0].pitch,
                  layer->planes[1].offset / layer->planes[0].pitch,
-                 RK_FORMAT_YCrCb_420_SP);
+                 src_format);
 
     memset(&dst, 0, sizeof(dst));
     dst.fd = jb->fd;
     dst.mmuFlag = 1;
-    Rect &dts_rect = slice_rect[index];
+
     rga_set_rect(&dst.rect, dts_rect.x, dts_rect.y,
                  dts_rect.w, dts_rect.h,
                  jb->width, jb->height,
@@ -4443,7 +4792,13 @@ int main(int argc, char **argv)
     av_register_all();
     avformat_network_init();
     while (std::getline(tokenStream, token, ' ')) {
-        std::unique_ptr<Input> input(new Input(token));
+        Input *i = nullptr;
+        if (!strncmp(token.c_str(), "/dev/video", 10)) {
+            i = new CameraInput(global_drm_fd, token);
+        } else {
+            i = new Input(token);
+        }
+        std::unique_ptr<Input> input(i);
         if (input.get() && input->Prepare()) {
             if (input->fps > frame_rate)
                 frame_rate = input->fps;
