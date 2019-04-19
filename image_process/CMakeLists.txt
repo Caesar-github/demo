@@ -29,7 +29,7 @@ if (DEFINED SDL_GLES2FUNCS_H_DIR)
 endif()
 
 set(RK_IMAGE_PROCESS_LINK_LIBRARIES
-    drm gflags avutil avformat avcodec rga SDL2 SDL2_ttf)
+    drm gflags avutil avformat avcodec rga SDL2 SDL2_ttf v4l2)
 option(RKNNCASCADE "compile RknnCascade" OFF)
 if(RKNNCASCADE)
     add_definitions(-DRKNNCASCADE=1)

@@ -73,6 +73,8 @@ DEFINE_string(npu_model_path, NPU_MODEL_PATH, "the path of mpu model");
 DEFINE_string(drm_conn_type, "DSI", "drm connector type. [DSI, CSI]");
 DEFINE_bool(drm_raw8_mode, false, "drm transfer with raw8");
 DEFINE_string(input, "", "input paths. separate each path by space.");
+DEFINE_uint32(input_width, 1280, "input width, such for v4l2, default 1280");
+DEFINE_uint32(input_height, 720, "input height, such for v4l2, default 720");
 DEFINE_int32(input_format, -1,
              "InputFormat: 0 nv12, 1 nv16, 2 rgb, 3 rgbx, 4 yuyv");
 DEFINE_uint32(width, WIDTH, "piece together width, default 4096");
@@ -717,8 +719,13 @@ static void FreeJoinBO(int drmfd, RockchipRga &rga, JoinBO *jb) {
   }
 }
 
+#define USE_LIBV4L2
+
 #include <assert.h>
 #include <linux/videodev2.h>
+#ifdef USE_LIBV4L2
+#include <libv4l2.h>
+#endif
 #include <sys/ioctl.h>
 
 static uint32_t get_v4l2_fmt(Format f) {
@@ -745,6 +752,8 @@ public:
 
   void enqueue_buffer(struct v4l2_buffer *buf);
 
+  enum v4l2_buf_type capture_type;
+  enum v4l2_memory memory_type;
   RockchipRga rga;
   int drm_fd;
   int fd; // camera fd
@@ -760,8 +769,9 @@ struct buff_data {
 };
 
 #define DUMP_FOURCC(f)                                                         \
-  (f >> 24) & 0xFF, (f >> 16) & 0xFF, (f >> 8) & 0xFF, f & 0xFF
+  f & 0xFF, (f >> 8) & 0xFF, (f >> 16) & 0xFF, (f >> 24) & 0xFF
 
+#ifndef USE_LIBV4L2
 #define v4l2_open open
 #define v4l2_close close
 #define v4l2_dup dup
@@ -769,14 +779,35 @@ struct buff_data {
 #define v4l2_read read
 #define v4l2_mmap mmap
 #define v4l2_munmap munmap
+#endif
+
+static int xioctl(int fd, int request, void *argp) {
+  int r;
+
+  do
+    r = v4l2_ioctl(fd, request, argp);
+  while (-1 == r && EINTR == errno);
+
+  return r;
+}
 
 CameraInput::CameraInput(int drmfd, std::string path)
-    : Input(path), drm_fd(drmfd), fd(-1), buffers_queued(0), width(1280),
-      height(720), buffer_length(0) {}
+    : Input(path), capture_type(V4L2_BUF_TYPE_VIDEO_CAPTURE),
+      memory_type(V4L2_MEMORY_MMAP /* V4L2_MEMORY_MMAP, V4L2_MEMORY_DMABUF */),
+      drm_fd(drmfd), fd(-1), buffers_queued(0), width(FLAGS_input_width),
+      height(FLAGS_input_height), buffer_length(0) {}
 
 CameraInput::~CameraInput() {
   for (JoinBO *jb : buffer_list) {
-    FreeJoinBO(drm_fd, rga, jb);
+    if (memory_type == V4L2_MEMORY_DMABUF) {
+      FreeJoinBO(drm_fd, rga, jb);
+    }
+    if (memory_type == V4L2_MEMORY_MMAP) {
+      if (jb->fd >= 0)
+        close(jb->fd);
+      if (jb->bo.ptr)
+        v4l2_munmap(jb->bo.ptr, buffer_length);
+    }
     delete jb;
   }
   if (fd >= 0)
@@ -784,13 +815,13 @@ CameraInput::~CameraInput() {
 }
 
 bool CameraInput::Stop() {
+  enum v4l2_buf_type type = capture_type;
+  if (fd >= 0)
+    xioctl(fd, VIDIOC_STREAMOFF, &type);
   bool ret = Input::Stop();
   for (auto frm : vfrm_list)
     av_frame_free(&frm);
   vfrm_list.clear();
-  enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (fd >= 0)
-    v4l2_ioctl(fd, VIDIOC_STREAMOFF, &type);
   return ret;
 }
 
@@ -800,23 +831,41 @@ static void release_av_frame(void *opaque, uint8_t *data) {
   AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor *)data;
   struct buff_data *bd = (struct buff_data *)opaque;
   CameraInput *s = bd->s;
-  buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  buf.memory = V4L2_MEMORY_DMABUF;
+  buf.type = s->capture_type;
+  buf.memory = s->memory_type;
   buf.index = bd->index;
   av_free(desc);
   av_free(bd);
-  JoinBO *jb = s->buffer_list[buf.index];
-  buf.m.fd = jb->fd;
-  buf.length = s->buffer_length;
+  if (buf.memory == V4L2_MEMORY_DMABUF) {
+    JoinBO *jb = s->buffer_list[buf.index];
+    buf.m.fd = jb->fd;
+    buf.length = s->buffer_length;
+  }
   s->enqueue_buffer(&buf);
 }
 
 void CameraInput::enqueue_buffer(struct v4l2_buffer *buf) {
-  if (v4l2_ioctl(fd, VIDIOC_QBUF, buf) < 0) {
+  if (xioctl(fd, VIDIOC_QBUF, buf) < 0) {
     av_log(NULL, AV_LOG_ERROR, "%s, ioctl(VIDIOC_QBUF): %m\n", path_.c_str());
   } else {
     buffers_queued.fetch_add(1);
   }
+}
+
+int buffer_export(int v4lfd, enum v4l2_buf_type bt, int index, int *dmafd) {
+  struct v4l2_exportbuffer expbuf;
+
+  memset(&expbuf, 0, sizeof(expbuf));
+  expbuf.type = bt;
+  expbuf.index = index;
+  if (ioctl(v4lfd, VIDIOC_EXPBUF, &expbuf) == -1) {
+    perror("VIDIOC_EXPBUF");
+    return -1;
+  }
+
+  *dmafd = expbuf.fd;
+
+  return 0;
 }
 
 bool CameraInput::Prepare() {
@@ -828,18 +877,24 @@ bool CameraInput::Prepare() {
   struct v4l2_format fmt;
   struct v4l2_requestbuffers req;
   struct v4l2_streamparm setfps;
-  enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  enum v4l2_buf_type type = capture_type;
 
   fd = v4l2_open(device, O_RDWR, 0);
   if (fd < 0) {
     av_log(NULL, AV_LOG_ERROR, "open %s failed %m\n", device);
     goto fail;
   }
-  if (v4l2_ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) {
+
+  if (xioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) {
     av_log(NULL, AV_LOG_ERROR, "Failed to ioctl(VIDIOC_QUERYCAP): %m\n");
     goto fail;
   }
-  if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
+  av_log(NULL, AV_LOG_INFO, "cap.capabilities: %08x \n", cap.capabilities);
+  if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)
+#ifndef USE_LIBV4L2
+      && !(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+#endif
+  ) {
     av_log(NULL, AV_LOG_ERROR, "%s, Not a video capture device.\n", device);
     goto fail;
   }
@@ -849,6 +904,11 @@ bool CameraInput::Prepare() {
     goto fail;
   }
 
+#ifndef USE_LIBV4L2
+  if (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+    capture_type = type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+#endif
+
   memset(&fmt, 0, sizeof(fmt));
   fmt.type = type;
   fmt.fmt.pix.width = w;
@@ -856,27 +916,41 @@ bool CameraInput::Prepare() {
   fmt.fmt.pix.pixelformat = get_v4l2_fmt(f);
   fmt.fmt.pix.field = V4L2_FIELD_ANY;
 
+  static bool specail_for_n4_yuyv = (f == Format::YUYV);
+
   if (fmt.fmt.pix.pixelformat == 0) {
     av_log(NULL, AV_LOG_ERROR, "unsupport input format : %d\n",
            FLAGS_input_format);
     goto fail;
   }
-  if (v4l2_ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
-    av_log(NULL, AV_LOG_ERROR, "%s, s fmt failed, %m\n", device);
+
+  if (specail_for_n4_yuyv) {
+    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_SRGGB8;
+    fmt.fmt.pix.width = 2 * w;
+  }
+
+  if (xioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
+    av_log(NULL, AV_LOG_ERROR, "%s, s fmt failed(type=%d, %c%c%c%c), %m\n",
+           device, type, DUMP_FOURCC(fmt.fmt.pix.pixelformat));
     goto fail;
   }
 
-  if (w != (int)fmt.fmt.pix.width || h != (int)fmt.fmt.pix.height) {
-    av_log(NULL, AV_LOG_WARNING, "%s change res from %dx%d to %dx%d\n", device,
-           w, h, fmt.fmt.pix.width, fmt.fmt.pix.height);
-    w = width = fmt.fmt.pix.width;
-    h = height = fmt.fmt.pix.height;
+  if (!specail_for_n4_yuyv) {
+    if (w != (int)fmt.fmt.pix.width || h != (int)fmt.fmt.pix.height) {
+      av_log(NULL, AV_LOG_WARNING, "%s change res from %dx%d to %dx%d\n",
+             device, w, h, fmt.fmt.pix.width, fmt.fmt.pix.height);
+      w = width = fmt.fmt.pix.width;
+      h = height = fmt.fmt.pix.height;
+    }
+    if (get_v4l2_fmt(f) != fmt.fmt.pix.pixelformat) {
+      av_log(NULL, AV_LOG_ERROR, "%s, expect %d, return %c%c%c%c\n", device,
+             FLAGS_input_format, DUMP_FOURCC(fmt.fmt.pix.pixelformat));
+      goto fail;
+    }
   }
-  if (get_v4l2_fmt(f) != fmt.fmt.pix.pixelformat) {
-    av_log(NULL, AV_LOG_ERROR, "%s, expect %d, return %c%c%c%c\n", device,
-           FLAGS_input_format, DUMP_FOURCC(fmt.fmt.pix.pixelformat));
-    goto fail;
-  }
+
+  av_log(NULL, AV_LOG_INFO, "fmt.fmt.pix_mp.num_planes: %d\n",
+         fmt.fmt.pix_mp.num_planes);
 
   // FLAGS_input_format = 1;
 
@@ -887,63 +961,110 @@ bool CameraInput::Prepare() {
   setfps.type = type;
   setfps.parm.capture.timeperframe.denominator = 30;
   setfps.parm.capture.timeperframe.numerator = 1;
-  if (v4l2_ioctl(fd, VIDIOC_S_PARM, &setfps) < 0) {
+  if (xioctl(fd, VIDIOC_S_PARM, &setfps) < 0) {
     av_log(NULL, AV_LOG_ERROR, "%s, s parm fps failed, %m\n", device);
-    goto fail;
+    fps = 30.0;
+  } else {
+    fps = (double)setfps.parm.capture.timeperframe.denominator /
+          setfps.parm.capture.timeperframe.numerator;
   }
-  fps = (double)setfps.parm.capture.timeperframe.denominator /
-        setfps.parm.capture.timeperframe.numerator;
 
   memset(&req, 0, sizeof(req));
   req.type = type;
   req.count = 4;
-  req.memory = V4L2_MEMORY_DMABUF;
+  req.memory = memory_type;
 
-  if (v4l2_ioctl(fd, VIDIOC_REQBUFS, &req) < 0) {
+  if (xioctl(fd, VIDIOC_REQBUFS, &req) < 0) {
     av_log(NULL, AV_LOG_ERROR, "%s, ioctl(VIDIOC_REQBUFS): %m\n", device);
     goto fail;
   }
   assert(req.count == 4);
-  w = (w + 15) & (~15);
-  h = (h + 15) & (~15);
-  buffer_length = w * h * get_format_bits(f) / 8;
-  for (size_t i = 0; i < req.count; i++) {
-    JoinBO *jb = new JoinBO();
-    assert(jb); // as only demo, do not set detail error log
-    if (!AllocJoinBO(drm_fd, rga, jb, w, h))
-      assert(0); // no memory
-    buffer_list.push_back(jb);
-  }
-
   // stream on
-  for (size_t i = 0; i < req.count; i++) {
-    struct v4l2_buffer buf;
-    memset(&buf, 0, sizeof(buf));
-    buf.type = type;
-    buf.index = i;
-    buf.memory = V4L2_MEMORY_DMABUF;
+  if (memory_type == V4L2_MEMORY_DMABUF) {
+    w = (w + 15) & (~15);
+    h = (h + 15) & (~15);
+    buffer_length = w * h * get_format_bits(f) / 8;
+    for (size_t i = 0; i < req.count; i++) {
+      struct v4l2_buffer buf;
+      memset(&buf, 0, sizeof(buf));
+      buf.type = type;
+      buf.index = i;
+      buf.memory = memory_type;
 
-    JoinBO *jb = buffer_list[i];
-    buf.m.fd = jb->fd;
-    buf.length = buffer_length;
-    if (v4l2_ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
-      av_log(NULL, AV_LOG_ERROR, "%s ioctl(VIDIOC_QBUF): %m\n", device);
-      goto fail;
+      JoinBO *jb = new JoinBO();
+      assert(jb); // as only demo, do not set detail error log
+      if (!AllocJoinBO(drm_fd, rga, jb, w, h))
+        assert(0); // no memory
+      buffer_list.push_back(jb);
+
+      buf.m.fd = jb->fd;
+      buf.length = buffer_length;
+      if (xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "%s ioctl(VIDIOC_QBUF): %m\n", device);
+        goto fail;
+      }
     }
   }
-  buffers_queued = req.count;
 
-  if (v4l2_ioctl(fd, VIDIOC_STREAMON, &type) < 0) {
+  if (memory_type == V4L2_MEMORY_MMAP) {
+    for (size_t i = 0; i < req.count; i++) {
+      struct v4l2_buffer buf;
+      JoinBO *jb = nullptr;
+      int dmafd = -1;
+      void *ptr = MAP_FAILED;
+      memset(&buf, 0, sizeof(buf));
+      buf.type = type;
+      buf.index = i;
+      buf.memory = memory_type;
+      if (xioctl(fd, VIDIOC_QUERYBUF, &buf) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "%s ioctl(VIDIOC_QUERYBUF): %m\n", device);
+        goto fail;
+      }
+      jb = new JoinBO();
+      assert(jb); // as only demo, do not set detail error log
+      memset(jb, 0, sizeof(*jb));
+      buffer_list.push_back(jb);
+
+      if (buffer_export(fd, capture_type, i, &dmafd) < 0) {
+        av_log(NULL, AV_LOG_INFO, "%s buffer_export (%d): %m\n", device,
+               (int)i);
+        ptr = v4l2_mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED,
+                        fd, buf.m.offset);
+        if (ptr == MAP_FAILED) {
+          av_log(NULL, AV_LOG_ERROR, "%s v4l2_mmap (%d): %m\n", device, (int)i);
+          goto fail;
+        }
+      }
+      jb->fd = dmafd;
+      if (ptr)
+        jb->bo.ptr = ptr;
+      buffer_length = buf.length;
+    }
+    for (size_t i = 0; i < req.count; ++i) {
+      struct v4l2_buffer buf;
+      memset(&buf, 0, sizeof(buf));
+      buf.type = capture_type;
+      buf.memory = memory_type;
+      buf.index = i;
+
+      if (xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "%s, ioctl(VIDIOC_QBUF): %m\n", device);
+        goto fail;
+      }
+    }
+  }
+
+  buffers_queued = req.count;
+  if (xioctl(fd, VIDIOC_STREAMON, &type) < 0) {
     av_log(NULL, AV_LOG_ERROR, "%s, ioctl(VIDIOC_STREAMON): %m\n", device);
     goto fail;
   }
-
   disp_thread = new std::thread(disp_loop, this);
   if (!disp_thread)
     goto fail;
-
   if (!Handler::Prepare())
     goto fail;
+
   return true;
 
 fail:
@@ -960,11 +1081,10 @@ void CameraInput::Run() {
     struct v4l2_buffer buf;
 
     memset(&buf, 0, sizeof(buf));
-    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buf.memory = V4L2_MEMORY_DMABUF;
+    buf.type = capture_type;
+    buf.memory = memory_type;
 
-    while ((res = v4l2_ioctl(fd, VIDIOC_DQBUF, &buf)) < 0 && (errno == EINTR))
-      ;
+    res = xioctl(fd, VIDIOC_DQBUF, &buf);
     if (res < 0) {
       if (errno == EAGAIN)
         continue;
@@ -1343,6 +1463,8 @@ bool Join::scale_frame_to(AVFrame *av_frame, JoinBO *jb, int index) {
   }
   memset(&src, 0, sizeof(src));
   src.fd = desc->objects[0].fd;
+  if (src.fd < 0)
+    src.virAddr = desc->objects[0].ptr;
   src.mmuFlag = 1;
   rga_set_rect(&src.rect, 0, 0, av_frame->width, av_frame->height,
                layer->planes[0].pitch,
@@ -4403,6 +4525,47 @@ void output_processer(NpuOutPutLeaf *npl, int index, int device_id) {
   }
   av_log(NULL, AV_LOG_INFO, "Output processer exit, device_id=%d\n", device_id);
 }
+#endif
+
+#if 0
+typedef int (*image_process)(JoinBO *in, JoinBO *out);
+class ImageFilterLeaf : public LeafHandler {
+public:
+  ImageFilterLeaf(int drmfd);
+  virtual ~ImageFilterLeaf();
+  bool Prepare(int max_buffer_num);
+  virtual void SubRun() override;
+
+  int drm_fd;
+  RockchipRga rga;
+  image_process func;
+  spinlock_mutex mtx;
+  std::list<std::shared_ptr<JoinBO *>> buffer_list;
+};
+
+bool ImageFilterLeaf::Prepare(int max_buffer_num, int w, int h) {
+  assert(max_buffer_num > 1);
+  for (int i = 0; i < max_buffer_num; i++) {
+    JoinBO *jb = new JoinBo();
+    assert(jb);
+    if (!AllocJoinBO(drm_fd, rga, jb, w, h))
+      return false;
+    buffer_list.push_back(std::shared_ptr<JoinBO *>(jb));
+  }
+  return LeafHandler::Prepare();
+}
+
+int bo_scale(JoinBO *in, JoinBO *out);
+
+typedef int (*npu_process)(void *input_img);
+typedef int (*result_in)(void *npu_out, void* disp_ptr, int disp_w, int disp_h,
+                         int x, int y);
+
+class NpuModelLeaf : public LeafHandler {
+public:
+    NpuModelLeaf();
+    virtual NpuModelLeaf();
+};
 #endif
 
 static void quit_program(const char *func, int line) {
