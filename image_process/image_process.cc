@@ -2723,7 +2723,6 @@ void SDLDisplayLeaf::SDLDestroy() {
   SDL_Quit();
 }
 
-#if DRAW_BY_SDL
 static int set_rga_ratation(const uint32_t rdegree, int *rotation) {
   // TODO: FLIP_H/FLIP_V
   switch (rdegree) {
@@ -2747,6 +2746,7 @@ static int set_rga_ratation(const uint32_t rdegree, int *rotation) {
   return 0;
 }
 
+#if DRAW_BY_SDL
 void SDLDisplayLeaf::SubRun() {
   if (!SDLPrepare()) {
     sdl_prepared = -1;
