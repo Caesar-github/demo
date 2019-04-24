@@ -68,8 +68,14 @@ DEFINE_uint32(npu_piece_width, NPU_PIECE_WIDTH,
               "piece width for npu input, default 300");
 DEFINE_uint32(npu_piece_height, NPU_PIECE_HEIGHT,
               "piece height for npu input, default 300");
-DEFINE_string(npu_data_source, "drm", "npu input data source. [usb, drm]");
+DEFINE_string(npu_data_source, "drm",
+              "npu input data source. [usb, drm, none]");
+#if RKNNCASCADE
 DEFINE_string(npu_model_path, NPU_MODEL_PATH, "the path of mpu model");
+#endif
+#if HAVE_ROCKX
+DEFINE_string(npu_model_name, "", "model name list. [ssd, dms]");
+#endif
 DEFINE_string(drm_conn_type, "DSI", "drm connector type. [DSI, CSI]");
 DEFINE_bool(drm_raw8_mode, false, "drm transfer with raw8");
 DEFINE_string(input, "", "input paths. separate each path by space.");
@@ -676,12 +682,17 @@ typedef struct {
   int width;
   int height;
   std::vector<int64_t> slice_pts_vec;
+  Format fmt;
 } JoinBO;
 
 static bool AllocJoinBO(int drmfd, RockchipRga &rga, JoinBO *jb, int w, int h) {
   bo_t bo;
   int fd = -1;
   memset(&bo, 0, sizeof(bo));
+  memset(jb, 0, sizeof(*jb));
+  jb->fd = -1;
+  jb->bo.fd = -1;
+  jb->bo.ptr = NULL;
   bo.fd = drmfd;
   if (rga.RkRgaAllocBuffer(drmfd, &bo, w, h, 32)) {
     av_log(NULL, AV_LOG_FATAL, "Fail to alloc large bo memory\n");
@@ -1139,13 +1150,33 @@ void CameraInput::Run() {
     assert(frame->buf[0]);
 
     PushFrame(frame);
+#if 0
+      static char name[64];
+      static int dump_fd = -1;
+      static int frame_num = 0;
+      sprintf(name, "/tmp/camera_dump.nv16");
+      if (dump_fd == -1) {
+        dump_fd = open(name, O_RDWR | O_CREAT | O_CLOEXEC);
+        assert(dump_fd >= 0);
+      }
+      int len = width * height * 2;
+      frame_num++;
+      printf("frame_num : %d\n", frame_num);
+      if (frame_num >= 500 && frame_num <= 750) {
+        write(dump_fd, jb->bo.ptr, len);
+      } else if (frame_num > 750) {
+          if (dump_fd >= 0)
+            close(dump_fd);
+          dump_fd = -2;
+      }
+#endif
   }
 }
 
 class LeafHandler : public Handler {
 public:
   LeafHandler() : max_bo_num(FLAGS_join_round_buffer_num - 1) {}
-  ~LeafHandler();
+  virtual ~LeafHandler();
   void PushBO(std::shared_ptr<JoinBO> jb);
   std::shared_ptr<JoinBO> PopBO(bool wait = true);
   virtual void Run() override;
@@ -1337,6 +1368,7 @@ bool Join::Prepare(int w, int h, int slicenum, int buffernum) {
     }
 
     jb->slice_pts_vec.resize(slice_num, -1);
+    jb->fmt = static_cast<Format>(FLAGS_format);
     available_buffer_list.push_back(jb);
   }
   return Handler::Prepare();
@@ -2131,7 +2163,7 @@ SDLFont::SDLFont(SDL_Color forecol, int ptsize)
       rendertype(RENDER_UTF8), pt_size(ptsize), font(NULL) {
   font = TTF_OpenFont(FLAGS_font.c_str(), ptsize);
   if (font == NULL) {
-    fprintf(stderr, "Couldn't load %d pt font from %s: %s\n", ptsize,
+    fprintf(stderr, "hehe Couldn't load %d pt font from %s: %s\n", ptsize,
             FLAGS_font.c_str(), SDL_GetError());
     return;
   }
@@ -2393,18 +2425,20 @@ SDLDisplayLeaf::SDLDisplayLeaf(int drmfd)
 #endif
 
 #if DRAW_BY_SDL
-int SDLDisplayLeaf::get_texture_fmt(Format f) {
-  static std::map<Format, int> rga_format_map;
-  if (rga_format_map.empty()) {
-    rga_format_map[Format::NV12] = SDL_PIXELFORMAT_NV12;
-    rga_format_map[Format::RGB] = SDL_PIXELFORMAT_RGB24;
-    rga_format_map[Format::RGBX] = SDL_PIXELFORMAT_RGBX8888;
+static int get_sdl_format(Format f) {
+  static std::map<Format, int> sdl_format_map;
+  if (sdl_format_map.empty()) {
+    sdl_format_map[Format::NV12] = SDL_PIXELFORMAT_NV12;
+    sdl_format_map[Format::RGB] = SDL_PIXELFORMAT_RGB24;
+    sdl_format_map[Format::RGBX] = SDL_PIXELFORMAT_RGBX8888;
   }
-  auto it = rga_format_map.find(f);
-  if (it != rga_format_map.end())
+  auto it = sdl_format_map.find(f);
+  if (it != sdl_format_map.end())
     return it->second;
-  return -1;
+  return SDL_PIXELFORMAT_UNKNOWN;
 }
+
+int SDLDisplayLeaf::get_texture_fmt(Format f) { return get_sdl_format(f); }
 
 int SDLDisplayLeaf::realloc_texture(SDL_Texture **tex, Uint32 new_format,
                                     int new_width, int new_height,
@@ -2658,7 +2692,7 @@ bool SDLDisplayLeaf::SDLPrepare() {
     goto fail;
   }
   texture_fmt = get_texture_fmt(static_cast<Format>(FLAGS_format));
-  if (texture_fmt < 0)
+  if (texture_fmt == SDL_PIXELFORMAT_UNKNOWN)
     return false;
 #endif
 
@@ -3335,6 +3369,120 @@ void SDLDisplayLeaf::SubRun() {
 }
 #endif
 
+#if HAVE_ROCKX
+
+#include "rockx/include/rockx.h"
+
+class DrawOperation;
+typedef void *(*npu_process)(std::vector<rockx_handle_t> &npu_handles,
+                             rockx_image_t *input_image);
+typedef int (*result_in)(void *npu_out, void *disp_ptr, int disp_w, int disp_h,
+                         SDL_Renderer *render);
+class NpuModelLeaf : public LeafHandler {
+public:
+  NpuModelLeaf(int draw_idx);
+  virtual ~NpuModelLeaf();
+  bool Prepare(std::string model_name);
+  virtual void SubRun() override;
+
+  npu_process img_func;
+  std::vector<rockx_handle_t> npu_handles;
+
+  DrawOperation *draw;
+  result_in show_func;
+  int draw_index;
+};
+
+class NpuResult {
+public:
+  NpuResult()
+      : got_time(av_gettime_relative() / 1000), timeout(200), index(-1),
+        leaf(nullptr), npu_out(nullptr) {}
+  ~NpuResult() {
+    if (npu_out)
+      free(npu_out);
+  }
+  void Draw(void *disp_ptr, int disp_w, int disp_h, SDL_Renderer *render) {
+    (*(leaf->show_func))(npu_out, disp_ptr, disp_w, disp_h, render);
+  }
+  int64_t got_time; // ms
+  int64_t timeout;  // ms
+  int index;
+  NpuModelLeaf *leaf;
+  void *npu_out;
+};
+
+class DrawOperation {
+public:
+  DrawOperation(int num) : gather_func(nullptr) {
+    mtxs.resize(num);
+    results.resize(num);
+    SDL_LogSetPriority(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_DEBUG);
+  }
+  ~DrawOperation() = default;
+  void Set(int idx, std::shared_ptr<NpuResult> nr) {
+    mtxs[idx].lock();
+    results[idx] = nr;
+    mtxs[idx].unlock();
+  }
+  void Draw(void *disp_ptr, int disp_w, int disp_h) {
+    static auto sdl_fmt = get_sdl_format(static_cast<Format>(FLAGS_format));
+    static int depth = get_format_bits(static_cast<Format>(FLAGS_format));
+    std::vector<std::shared_ptr<NpuResult>> draw_rs;
+    int64_t now = av_gettime_relative() / 1000;
+    for (size_t i = 0; i < mtxs.size(); i++) {
+      spinlock_mutex &smtx = mtxs[i];
+      smtx.lock();
+      std::shared_ptr<NpuResult> &nr = results[i];
+      if (nr) {
+        if (now - nr->got_time < nr->timeout)
+          draw_rs.push_back(nr);
+        else
+          results[i].reset();
+      }
+      smtx.unlock();
+    }
+    if (draw_rs.empty())
+      return;
+    SDL_Surface *surface = SDL_CreateRGBSurfaceWithFormatFrom(
+        disp_ptr, disp_w, disp_h, depth, disp_w * depth / 8, sdl_fmt);
+    if (!surface) {
+      av_log(NULL, AV_LOG_FATAL,
+             "SDL_CreateRGBSurfaceWithFormatFrom failed at line %d\n",
+             __LINE__);
+      return;
+    }
+    SDL_Renderer *render = SDL_CreateSoftwareRenderer(surface);
+    if (!render) {
+      av_log(NULL, AV_LOG_FATAL,
+             "SDL_CreateSoftwareRenderer failed at line %d\n", __LINE__);
+      return;
+    }
+    std::vector<void *> npu_outs;
+    npu_outs.resize(mtxs.size(), nullptr);
+    for (auto &nr : draw_rs) {
+      nr->Draw(disp_ptr, disp_w, disp_h, render);
+      npu_outs[nr->index] = nr->npu_out;
+    }
+    if (gather_func)
+      gather_func((void *)&npu_outs, disp_ptr, disp_w, disp_h, render);
+    SDL_RenderPresent(render);
+    SDL_DestroyRenderer(render);
+    SDL_FreeSurface(surface);
+  }
+
+  // SDL_Renderer *render;
+  std::vector<spinlock_mutex> mtxs;
+  std::vector<std::shared_ptr<NpuResult>> results;
+  result_in gather_func;
+};
+#else
+class DrawOperation {
+public:
+  void Draw(void *disp_ptr, int disp_w, int disp_h) {}
+};
+#endif // HAVE_ROCKX
+
 enum csi_path_mode { VOP_PATH = 0, BYPASS_PATH };
 
 enum vop_pdaf_mode {
@@ -3526,6 +3674,8 @@ public:
 
   bool waiting_for_flip;
   drmEventContext drm_evctx;
+
+  DrawOperation *sub_draw;
 };
 
 struct DRMDisplayLeaf::resources *
@@ -3933,7 +4083,7 @@ DRMDisplayLeaf::DRMDisplayLeaf(int drmfd, const char *connector_key,
                                const char *encoder_key, int width, int height,
                                uint32_t rotate)
     : drm_fd(drmfd), scale_width(width), scale_height(height),
-      scale_rotate(rotate), waiting_for_flip(false) {
+      scale_rotate(rotate), waiting_for_flip(false), sub_draw(nullptr) {
   if (connector_key)
     snprintf(connector_name_key, sizeof(connector_name_key), "%s",
              connector_key);
@@ -3954,10 +4104,12 @@ DRMDisplayLeaf::DRMDisplayLeaf(int drmfd, const char *connector_key,
   dev.fd = -1;
 
   crtc_jb.fd = -1;
+  memset(&crtc_jb.bo, 0, sizeof(crtc_jb.bo));
   crtc_jb.bo.fd = -1;
   crtc_fb_id = 0;
 
   hdmi_jb.fd = -1;
+  memset(&hdmi_jb.bo, 0, sizeof(hdmi_jb.bo));
   hdmi_jb.bo.fd = -1;
   hdmi_fb_id = 0;
 }
@@ -4256,6 +4408,8 @@ void DRMDisplayLeaf::SubRun() {
     JoinBO *jb = sjb.get();
     if (!jb)
       continue;
+    if (sub_draw)
+      sub_draw->Draw(jb->bo.ptr, jb->width, jb->height);
     if (do_rga_blit) {
       if (!rga_blit_jb(rga, jb, &jbs[render_jb_id], rotation))
         continue;
@@ -4527,46 +4681,655 @@ void output_processer(NpuOutPutLeaf *npl, int index, int device_id) {
 }
 #endif
 
-#if 0
-typedef int (*image_process)(JoinBO *in, JoinBO *out);
+RockchipRga global_rga;
+
+typedef bool (*image_process)(JoinBO *in, JoinBO *out);
 class ImageFilterLeaf : public LeafHandler {
 public:
   ImageFilterLeaf(int drmfd);
   virtual ~ImageFilterLeaf();
-  bool Prepare(int max_buffer_num);
+  bool Prepare(int max_buffer_num, int w, int h, Format f);
   virtual void SubRun() override;
 
+  void AddLeaf(LeafHandler *h) {
+    std::lock_guard<std::mutex> _lg(leaf_mutex);
+    leaf_handler_list.push_back(h);
+  }
+  //   void RemoveLeaf(LeafHandler *h) {
+  //     std::lock_guard<std::mutex> _lg(leaf_mutex);
+  //     leaf_handler_list.remove(h);
+  //   }
+  bool StartLeafs() {
+    std::list<LeafHandler *> leafs;
+    leaf_mutex.lock();
+    leafs = leaf_handler_list;
+    leaf_mutex.unlock();
+    for (auto l : leafs) {
+      l->Start();
+    }
+    return true;
+  }
+  void StopAndRemoveLeafs() {
+    std::list<LeafHandler *> leafs;
+    leaf_mutex.lock();
+    leafs = leaf_handler_list;
+    leaf_mutex.unlock();
+    for (auto l : leafs)
+      l->Stop();
+    leaf_mutex.lock();
+    for (auto l : leaf_handler_list)
+      delete l;
+    leaf_mutex.unlock();
+  }
+  void dispatch_buffer(std::shared_ptr<JoinBO> jb) {
+    for (auto h : leaf_handler_list)
+      h->PushBO(jb);
+  }
+
   int drm_fd;
-  RockchipRga rga;
   image_process func;
   spinlock_mutex mtx;
-  std::list<std::shared_ptr<JoinBO *>> buffer_list;
+  std::list<JoinBO *> buffer_list;
+
+  std::mutex leaf_mutex;
+  std::list<LeafHandler *> leaf_handler_list;
 };
 
-bool ImageFilterLeaf::Prepare(int max_buffer_num, int w, int h) {
+ImageFilterLeaf::ImageFilterLeaf(int drmfd) : drm_fd(drmfd), func(nullptr) {}
+ImageFilterLeaf::~ImageFilterLeaf() {
+  StopAndRemoveLeafs();
+  for (JoinBO *jb : buffer_list)
+    FreeJoinBO(drm_fd, global_rga, jb);
+}
+
+bool ImageFilterLeaf::Prepare(int max_buffer_num, int w, int h, Format f) {
   assert(max_buffer_num > 1);
   for (int i = 0; i < max_buffer_num; i++) {
-    JoinBO *jb = new JoinBo();
+    JoinBO *jb = new JoinBO();
     assert(jb);
-    if (!AllocJoinBO(drm_fd, rga, jb, w, h))
+    if (!AllocJoinBO(drm_fd, global_rga, jb, w, h))
       return false;
-    buffer_list.push_back(std::shared_ptr<JoinBO *>(jb));
+    jb->fmt = f;
+    buffer_list.push_back(jb);
   }
   return LeafHandler::Prepare();
 }
 
-int bo_scale(JoinBO *in, JoinBO *out);
+void ImageFilterLeaf::SubRun() {
+  while (!req_exit_) {
+    JoinBO *output_jb = nullptr;
+    std::shared_ptr<JoinBO> sjb = PopBO();
+    JoinBO *input_jb = sjb.get();
+    if (!input_jb)
+      continue;
+    mtx.lock();
+    if (!buffer_list.empty()) {
+      output_jb = buffer_list.front();
+      buffer_list.pop_front();
+    }
+    mtx.unlock();
+    if (!output_jb)
+      continue;
+    static auto recyle_fun = [this](JoinBO *jj) {
+      mtx.lock();
+      buffer_list.push_back(jj);
+      mtx.unlock();
+    };
+    std::shared_ptr<JoinBO> out(output_jb, recyle_fun);
+    int ret = (*func)(input_jb, output_jb);
+    if (ret)
+      dispatch_buffer(out);
+  }
+}
 
-typedef int (*npu_process)(void *input_img);
-typedef int (*result_in)(void *npu_out, void* disp_ptr, int disp_w, int disp_h,
-                         int x, int y);
+static bool bo_scale(JoinBO *in, JoinBO *out) {
+  rga_info_t src, dst;
+  memset(&src, 0, sizeof(src));
+  memset(&dst, 0, sizeof(dst));
+  src.fd = in->fd;
+  src.mmuFlag = 1;
+  rga_set_rect(&src.rect, 0, 0, in->width, in->height, in->width, in->height,
+               get_rga_format(in->fmt));
+  dst.fd = out->fd;
+  dst.mmuFlag = 1;
+  rga_set_rect(&dst.rect, 0, 0, out->width, out->height, out->width,
+               out->height, get_rga_format(out->fmt));
+  int ret = global_rga.RkRgaBlit(&src, &dst, NULL);
+  if (ret) {
+    av_log(NULL, AV_LOG_ERROR, "RkRgaBlit error : %s\n", strerror(ret));
+    return false;
+  }
+  return true;
+}
 
-class NpuModelLeaf : public LeafHandler {
-public:
-    NpuModelLeaf();
-    virtual NpuModelLeaf();
-};
+#if HAVE_ROCKX
+NpuModelLeaf::NpuModelLeaf(int draw_idx)
+    : img_func(nullptr), draw(nullptr), show_func(nullptr),
+      draw_index(draw_idx) {}
+
+NpuModelLeaf::~NpuModelLeaf() {
+  for (auto handle : npu_handles)
+    rockx_destroy(handle);
+}
+
+bool NpuModelLeaf::Prepare(std::string model_name) {
+  std::vector<rockx_module_t> models;
+  void *config = nullptr;
+  size_t config_size = 0;
+  if (model_name == "face_landmark") {
+    models.push_back(ROCKX_MODULE_FACE_DETECTION);
+    models.push_back(ROCKX_MODULE_FACE_LANDMARK);
+  } else if (model_name == "pose_finger") {
+    models.push_back(ROCKX_MODULE_POSE_FINGER);
+    rockx_config_finger_t *cfg =
+        (rockx_config_finger_t *)malloc(sizeof(rockx_config_finger_t));
+    assert(cfg);
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->algo = 1;
+    config = cfg;
+    config_size = sizeof(*cfg);
+  } else if (model_name == "pose_body") {
+    models.push_back(ROCKX_MODULE_POSE_BODY);
+  } else if (model_name == "object_detect") {
+    models.push_back(ROCKX_MODULE_OBJECT_DETECTION);
+  } else {
+    av_log(NULL, AV_LOG_FATAL, "TODO: %s\n", model_name.c_str());
+    return false;
+  }
+  npu_handles.resize(models.size(), nullptr);
+  for (size_t i = 0; i < models.size(); i++) {
+    rockx_handle_t npu_handle = nullptr;
+    rockx_module_t model = models[i];
+    rockx_ret_t ret = rockx_create(&npu_handle, model, config, config_size);
+    if (ret != ROCKX_RET_SUCCESS) {
+      av_log(NULL, AV_LOG_FATAL, "init rockx module %d error=%d\n", model, ret);
+      return false;
+    }
+    npu_handles[i] = npu_handle;
+  }
+  return LeafHandler::Prepare();
+}
+
+void NpuModelLeaf::SubRun() {
+  while (!req_exit_) {
+    std::shared_ptr<JoinBO> sjb = PopBO();
+    JoinBO *jb = sjb.get();
+    if (!jb)
+      continue;
+    rockx_image_t input_image;
+    input_image.width = jb->width;
+    input_image.height = jb->height;
+    input_image.data = (uint8_t *)jb->bo.ptr;
+    input_image.pixel_format = ROCKX_PIXEL_FORMAT_BGR888;
+    void *npu_out = img_func(npu_handles, &input_image);
+    if (npu_out) {
+#if 0
+      static char name[64];
+      static int dump_fd = -1;
+      sprintf(name, "/tmp/dump_%d_%d.rgb888", jb->width, jb->height);
+      dump_fd = open(name, O_RDWR | O_CREAT | O_CLOEXEC);
+      assert(dump_fd >= 0);
+      write(dump_fd, jb->bo.ptr, jb->width * jb->height * 3);
+      close(dump_fd);
 #endif
+      auto nr = std::make_shared<NpuResult>();
+      nr->leaf = this;
+      nr->npu_out = npu_out;
+      nr->index = draw_index;
+      draw->Set(draw_index, nr);
+    }
+  }
+}
+
+#include <SDL2/SDL2_gfxPrimitives.h>
+
+static SDL_Texture *load_texture(SDL_Surface *sur, SDL_Renderer *render,
+                                 SDL_Rect *texture_dimensions) {
+  SDL_Texture *texture = SDL_CreateTextureFromSurface(render, sur);
+  assert(texture);
+  Uint32 pixelFormat;
+  int access;
+  texture_dimensions->x = 0;
+  texture_dimensions->y = 0;
+  SDL_QueryTexture(texture, &pixelFormat, &access, &texture_dimensions->w,
+                   &texture_dimensions->h);
+  return texture;
+}
+
+static void *face_landmark_process(std::vector<rockx_handle_t> &npu_handles,
+                                   rockx_image_t *input_image) {
+  rockx_handle_t face_det_handle = npu_handles[0];
+  rockx_face_array_t face_array;
+  memset(&face_array, 0, sizeof(rockx_face_array_t));
+
+  rockx_ret_t ret =
+      rockx_face_detect(face_det_handle, input_image, &face_array, nullptr);
+  if (ret != ROCKX_RET_SUCCESS) {
+    printf("rockx_face_detect error %d\n", ret);
+    return nullptr;
+  }
+  // select the max big face
+  rockx_face_t face;
+  int area = 0;
+  for (int i = 0; i < face_array.count; i++) {
+    rockx_face_t &f = face_array.face[i];
+    int left = f.box.left;
+    int top = f.box.top;
+    int right = f.box.right;
+    int bottom = f.box.bottom;
+    // float score = f.score;
+    // printf("box=(%d %d %d %d) score=%f\n", left, top, right, bottom, score);
+    int a = (right - left) * (bottom - top);
+    if (area < a && top > 5) {
+      area = a;
+      face = f;
+    }
+  }
+  if (area <= 8)
+    return nullptr;
+  rockx_handle_t face_landmark_handle = npu_handles[1];
+  rockx_face_landmark_t *out_landmark =
+      (rockx_face_landmark_t *)malloc(sizeof(rockx_face_landmark_t));
+  memset(out_landmark, 0, sizeof(rockx_face_landmark_t));
+
+  ret = rockx_face_landmark(face_landmark_handle, input_image, &face.box,
+                            out_landmark);
+
+  // printf("landmarks_count = %d, euler_angles = {Pitch:%.1f, Yaw:%.1f,
+  // Roll:%.1f}\n", out_landmark->landmarks_count,
+  // out_landmark->euler_angles[0], out_landmark->euler_angles[1],
+  // out_landmark->euler_angles[2]);
+
+  return out_landmark;
+}
+
+static int face_landmark_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
+                              int disp_h, SDL_Renderer *render) {
+  static const std::vector<std::pair<int, int>> landmarkPairs = {
+      {0, 1},   {1, 2},   {2, 3},   {3, 4},   {4, 5},   {5, 6},   {6, 7},
+      {7, 8},   {8, 9},   {9, 10},  {10, 11}, {11, 12}, {12, 13}, {13, 14},
+      {14, 15}, {15, 16}, {17, 18}, {18, 19}, {19, 20}, {20, 21}, {22, 23},
+      {23, 24}, {24, 25}, {25, 26}, {27, 28}, {28, 29}, {29, 30}, {31, 32},
+      {32, 33}, {33, 34}, {34, 35}, {36, 37}, {37, 38}, {38, 39}, {39, 40},
+      {40, 41}, {41, 36}, {42, 43}, {43, 44}, {44, 45}, {45, 46}, {46, 47},
+      {47, 42}, {48, 49}, {49, 50}, {50, 51}, {51, 52}, {52, 53}, {53, 54},
+      {54, 55}, {55, 56}, {56, 57}, {57, 58}, {58, 59}, {59, 48}, {60, 61},
+      {61, 62}, {62, 63}, {63, 64}, {64, 65}, {65, 66}, {66, 67}, {67, 60}};
+  static int w = FLAGS_npu_piece_width;
+  static int h = FLAGS_npu_piece_height;
+  static float scale_w = (float)disp_w / (float)w;
+  static float scale_h = (float)disp_h / (float)h;
+
+  rockx_face_landmark_t *landmark = (rockx_face_landmark_t *)npu_out;
+#if 1
+  // let this leak
+  static SDL_Surface *sur_point = SDL_LoadBMP("/userdata/dot_mobilenet.bmp");
+  assert(sur_point);
+  SDL_Rect point_texture_dimension;
+  SDL_Texture *point_texture =
+      load_texture(sur_point, render, &point_texture_dimension);
+  assert(point_texture);
+
+  SDL_SetRenderDrawBlendMode(render, SDL_BLENDMODE_BLEND);
+  SDL_Rect dst_dimension;
+  dst_dimension.w = point_texture_dimension.w;
+  dst_dimension.h = point_texture_dimension.h;
+  for (int j = 0; j < landmark->landmarks_count; j++) {
+    float x0 = landmark->landmarks[j].x;
+    float y0 = landmark->landmarks[j].y;
+    if (x0 > 0 && y0 > 0) {
+      dst_dimension.x = x0 * scale_w - dst_dimension.w / 2;
+      dst_dimension.y = y0 * scale_h - dst_dimension.h / 2;
+      SDL_RenderCopy(render, point_texture, &point_texture_dimension,
+                     &dst_dimension);
+      // SDL_RenderDrawPoint(render, landmark->landmarks[j].x *
+      // scale_w,landmark->landmarks[j].y * scale_h);
+    }
+  }
+  SDL_DestroyTexture(point_texture);
+#else
+  SDL_SetRenderDrawBlendMode(render, SDL_BLENDMODE_NONE);
+  SDL_SetRenderDrawColor(render, 0xFF, 0xEB, 0x06, 0xFF);
+  int count = landmark->landmarks_count;
+  for (size_t j = 0; j < landmarkPairs.size(); j++) {
+    const std::pair<int, int> &landmarkPair = landmarkPairs[j];
+    int idx1 = landmarkPair.first;
+    int idx2 = landmarkPair.second;
+    if (idx1 >= count || idx2 >= count)
+      break;
+    float x0 = landmark->landmarks[idx1].x * scale_w;
+    float y0 = landmark->landmarks[idx1].y * scale_h;
+    float x1 = landmark->landmarks[idx2].x * scale_w;
+    float y1 = landmark->landmarks[idx2].y * scale_h;
+    if (x0 > 0 && y0 > 0 && x1 > 0 && y1 > 0) {
+      SDL_RenderDrawLine(render, x0, y0, x1, y1);
+    }
+  }
+#endif
+  return 0;
+}
+
+static void *pose_finger_process(std::vector<rockx_handle_t> &npu_handles,
+                                 rockx_image_t *input_image) {
+  rockx_handle_t pose_finger_handle = npu_handles[0];
+  rockx_finger_t *finger = (rockx_finger_t *)malloc(sizeof(rockx_finger_t));
+  assert(finger);
+  memset(finger, 0, sizeof(rockx_finger_t));
+
+  rockx_ret_t ret = rockx_pose_finger(pose_finger_handle, input_image, finger);
+  if (ret != ROCKX_RET_SUCCESS) {
+    printf("rockx_pose_finger error %d\n", ret);
+    free(finger);
+    return nullptr;
+  }
+  // printf("finger count: %d\n", finger->count);
+  if (finger->count <= 0) {
+    free(finger);
+    return nullptr;
+  }
+  return finger;
+}
+
+static int pose_finger_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
+                            int disp_h, SDL_Renderer *render) {
+  static const std::vector<std::pair<int, int>> posePairs = {
+      {0, 1},   {1, 2},   {2, 3},  {3, 4},   {0, 5},   {5, 6},  {6, 7},
+      {7, 8},   {0, 9},   {9, 10}, {10, 11}, {11, 12}, {0, 13}, {13, 14},
+      {14, 15}, {15, 16}, {0, 17}, {17, 18}, {18, 19}, {19, 20}};
+  static int w = FLAGS_npu_piece_width;
+  static int h = FLAGS_npu_piece_height;
+  SDL_SetRenderDrawBlendMode(render, SDL_BLENDMODE_NONE);
+  SDL_SetRenderDrawColor(render, 0xFF, 0x06, 0xEB, 0xFF);
+  static float scale_w = (float)disp_w / w;
+  static float scale_h = (float)disp_h / h;
+  rockx_finger_t *finger = (rockx_finger_t *)npu_out;
+  for (size_t j = 0; j < posePairs.size(); j++) {
+    const std::pair<int, int> &posePair = posePairs[j];
+    float x0 = finger->key_points[posePair.first].x;
+    float y0 = finger->key_points[posePair.first].y;
+    float x1 = finger->key_points[posePair.second].x;
+    float y1 = finger->key_points[posePair.second].y;
+    if (x0 > 0 && y0 > 0 && x1 > 0 && y1 > 0) {
+      x0 *= scale_w;
+      y0 *= scale_h;
+      x1 *= scale_w;
+      y1 *= scale_h;
+      // printf("[%d, %d] x0, y0 (%f, %f); x1, y1 (%f, %f)\n", disp_w, disp_h,
+      // x0, y0, x1, y1);
+      SDL_RenderDrawLine(render, x0, y0, x1, y1);
+    }
+  }
+  return 0;
+}
+
+static void *pose_body_process(std::vector<rockx_handle_t> &npu_handles,
+                               rockx_image_t *input_image) {
+  rockx_handle_t pose_body_handle = npu_handles[0];
+  rockx_body_array_t body_array;
+  memset(&body_array, 0, sizeof(rockx_body_array_t));
+
+  rockx_ret_t ret = rockx_pose_body(pose_body_handle, input_image, &body_array);
+  if (ret != ROCKX_RET_SUCCESS) {
+    printf("rockx_pose_body error %d\n", ret);
+    return nullptr;
+  }
+  // printf("body count: %d\n", body_array.count);
+  if (body_array.count <= 0)
+    return nullptr;
+
+  // select the bigest body
+  int index = -1;
+  float area = 0;
+  for (int i = 0; i < body_array.count; i++) {
+    rockx_body_t &body = body_array.body[i];
+    float l = 0, t = 0, r = 0, b = 0;
+    for (int j = 0; j < body.count; j++) {
+      float x = body.key_points[j].x;
+      float y = body.key_points[j].y;
+      if (x < 0)
+        x = 0;
+      if (y < 0)
+        y = 0;
+      if (x < l)
+        l = x;
+      if (y < t)
+        t = y;
+      if (x > r)
+        r = x;
+      if (y > b)
+        b = y;
+      // printf("boxy[%d] x,y : %f, %f\n", j, x, y);
+    }
+    if (l >= 0 && t >= 0 && r > 0 && b > 0) {
+      float a = (r - l) * (b - t);
+      if (area < a) {
+        area = a;
+        index = i;
+      }
+    }
+    // printf("\n[%d]::\nl,t,r,b : %f,%f,%f,%f; a:%f\n\n", i, l,t,r,b, area);
+  }
+
+  rockx_body_t *ret_body = nullptr;
+  if (index >= 0 && area > 8) {
+    ret_body = (rockx_body_t *)malloc(sizeof(rockx_body_t));
+    if (!ret_body)
+      return nullptr;
+    *ret_body = body_array.body[index];
+  }
+
+  return ret_body;
+}
+
+static int pose_body_draw(void *npu_out, void *disp_ptr, int disp_w, int disp_h,
+                          SDL_Renderer *render) {
+  const std::vector<std::pair<int, int>> posePairs = {
+      {1, 2}, {1, 5},  {2, 3},   {3, 4},  {5, 6},   {6, 7},
+      {1, 8}, {8, 9},  {9, 10},  {1, 11}, {11, 12}, {12, 13},
+      {1, 0}, {0, 14}, {14, 16}, {0, 15}, {15, 17}};
+  static int w = FLAGS_npu_piece_width;
+  static int h = FLAGS_npu_piece_height;
+  SDL_SetRenderDrawBlendMode(render, SDL_BLENDMODE_NONE);
+  // SDL_SetRenderDrawColor(render, 0xFF, 0x06, 0xEB, 0xFF);
+  static float scale_w = (float)disp_w / w;
+  static float scale_h = (float)disp_h / h;
+  rockx_body_t *body = (rockx_body_t *)npu_out;
+  for (size_t j = 0; j < posePairs.size(); j++) {
+    const std::pair<int, int> &posePair = posePairs[j];
+    float x0 = body->key_points[posePair.first].x;
+    float y0 = body->key_points[posePair.first].y;
+    float x1 = body->key_points[posePair.second].x;
+    float y1 = body->key_points[posePair.second].y;
+    if (x0 > 0 && y0 > 0 && x1 > 0 && y1 > 0) {
+      x0 *= scale_w;
+      y0 *= scale_h;
+      x1 *= scale_w;
+      y1 *= scale_h;
+      // printf("[%d, %d] body x0, y0 (%f, %f); x1, y1 (%f, %f)\n", disp_w,
+      // disp_h, x0, y0, x1, y1); SDL_RenderDrawLine(render, x0, y0, x1, y1);
+      thickLineRGBA(render, x0, y0, x1, y1, 5, 255 /*b*/, 78 /*r*/, 138 /*g*/,
+                    255);
+    }
+  }
+  for (int i = 0; i < body->count; i++) {
+    float x0 = body->key_points[i].x;
+    float y0 = body->key_points[i].y;
+    if (x0 > 0 && y0 > 0) {
+      x0 *= scale_w;
+      y0 *= scale_h;
+      filledCircleRGBA(render, x0, y0, 8, 255, 78, 138, 255);
+    }
+  }
+  // crop
+  float x2 = body->key_points[2].x;
+  float y2 = body->key_points[2].y;
+  float x5 = body->key_points[5].x;
+  float y5 = body->key_points[5].y;
+  float x4 = body->key_points[4].x;
+  float y4 = body->key_points[4].y;
+  float x7 = body->key_points[7].x;
+  float y7 = body->key_points[7].y;
+  if (((x2 > 0 && y2 > 0) || (x5 > 0 && y5 > 0)) &&
+      ((x4 > 0 && y4 > 0) || (x7 > 0 && y7 > 0))) {
+    float jian_y = h;
+    if (x2 > 0 && y2 > 0)
+      jian_y = y2;
+    if ((x5 > 0 && y5 > 0) && jian_y > y5)
+      jian_y = y5;
+    float shou_x = 0, shou_y = h;
+    if (x4 > 0 && y4 > 0) {
+      shou_x = x4;
+      shou_y = y4;
+    }
+    if ((x7 > 0 && y7 > 0) && shou_y > y7) {
+      shou_x = x7;
+      shou_y = y7;
+    }
+    // printf("shou_y: %f, jian_y: %f\n", shou_y, jian_y);
+    if (shou_y <= jian_y + 20) {
+      static int ww = 100;
+      static int dst_x = disp_w - ww * 2;
+      static int dst_y = ww;
+      int x = shou_x * scale_w - ww;
+      if (x < 0)
+        x = 0;
+      int y = shou_y * scale_h - ww * 2;
+      if (y < 0)
+        y = 0;
+      static int bits = get_format_bits(static_cast<Format>(FLAGS_format));
+      int pitch = disp_w * bits / 8;
+      uint8_t *dest = (uint8_t *)disp_ptr + dst_y * pitch + dst_x * bits / 8;
+      uint8_t *src = (uint8_t *)disp_ptr + y * pitch + x * bits / 8;
+      for (int i = 0; i < ww * 2; i++) {
+        memmove(dest + pitch * i, src + pitch * i, ww * 2 * bits / 8);
+      }
+    }
+  }
+  return 0;
+}
+
+static bool CreateDMS(ImageFilterLeaf *ifl, DrawOperation *draw) {
+  av_log(NULL, AV_LOG_INFO, "CreateDMS\n");
+  bool ret;
+  NpuModelLeaf *dms_pose = new NpuModelLeaf(0);
+  assert(dms_pose);
+  if (false) {
+    ret = dms_pose->Prepare("pose_finger");
+    assert(ret);
+    dms_pose->draw = draw;
+    dms_pose->img_func = pose_finger_process;
+    dms_pose->show_func = pose_finger_draw;
+  } else {
+    ret = dms_pose->Prepare("pose_body");
+    assert(ret);
+    dms_pose->draw = draw;
+    dms_pose->img_func = pose_body_process;
+    dms_pose->show_func = pose_body_draw;
+  }
+  ifl->AddLeaf(dms_pose);
+
+  NpuModelLeaf *dms_face = new NpuModelLeaf(1);
+  assert(dms_face);
+  ret = dms_face->Prepare("face_landmark");
+  assert(ret);
+  dms_face->draw = draw;
+  dms_face->img_func = face_landmark_process;
+  dms_face->show_func = face_landmark_draw;
+  ifl->AddLeaf(dms_face);
+
+  // draw->gather_func =;
+
+  return true;
+}
+
+static void *ssd_process(std::vector<rockx_handle_t> &npu_handles,
+                         rockx_image_t *input_image) {
+  rockx_handle_t object_det_handle = npu_handles[0];
+  rockx_object_array_t *object_array =
+      (rockx_object_array_t *)malloc(sizeof(rockx_object_array_t));
+  assert(object_array);
+  memset(object_array, 0, sizeof(rockx_object_array_t));
+
+  rockx_ret_t ret = rockx_object_detect(object_det_handle, input_image,
+                                        object_array, nullptr);
+  if (ret != ROCKX_RET_SUCCESS) {
+    printf("rockx_object_detect error %d\n", ret);
+    free(object_array);
+    return nullptr;
+  }
+  // printf("object_array count: %d\n", object_array->count);
+  if (object_array->count <= 0) {
+    free(object_array);
+    return nullptr;
+  }
+  return object_array;
+}
+
+static int ssd_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
+                    int disp_h, SDL_Renderer *render) {
+  static int w = FLAGS_npu_piece_width;
+  static int h = FLAGS_npu_piece_height;
+
+  static SDLFont *sdl_font = nullptr;
+
+  if (!sdl_font) {
+    // let this leak
+    sdl_font = new SDLFont(red, 16);
+    assert(sdl_font);
+  }
+
+  SDL_SetRenderDrawBlendMode(render, SDL_BLENDMODE_NONE);
+  SDL_SetRenderDrawColor(render, 0xFF, 0x10, 0xEB, 0xFF);
+  rockx_object_array_t *object_array = (rockx_object_array_t *)npu_out;
+  for (int i = 0; i < object_array->count; i++) {
+    int left = object_array->object[i].box.left;
+    int top = object_array->object[i].box.top;
+    int right = object_array->object[i].box.right;
+    int bottom = object_array->object[i].box.bottom;
+    // int cls_idx = object_array->object[i].cls_idx;
+    const char *cls_name = object_array->object[i].cls_name;
+    // float score = object_array->object[i].score;
+    // printf("~~~ box=(%d %d %d %d) cls_name=%s, score=%f\n", left, top, right,
+    // bottom, cls_name, score);
+    SDL_Rect rect = {left * disp_w / w, top * disp_h / h,
+                     (right - left) * disp_w / w, (bottom - top) * disp_h / h};
+    SDL_RenderDrawRect(render, &rect);
+    int fontw = 0, fonth = 0;
+    SDL_Surface *name = sdl_font->GetFontPicture(
+        (char *)cls_name, strlen(cls_name), 32, &fontw, &fonth);
+    if (name) {
+      SDL_Rect texture_dimension;
+      SDL_Texture *texture = load_texture(name, render, &texture_dimension);
+      SDL_FreeSurface(name);
+      SDL_Rect dst_dimension;
+      dst_dimension.x = rect.x;
+      dst_dimension.y = rect.y - 18;
+      dst_dimension.w = texture_dimension.w;
+      dst_dimension.h = texture_dimension.h;
+      SDL_RenderCopy(render, texture, &texture_dimension, &dst_dimension);
+      SDL_DestroyTexture(texture);
+    }
+    // putText(orig_img, cls_name, cv::Point(left, top - 8), 1, 1,
+    // colorArray[cls_idx%10], 2);
+  }
+  return 0;
+}
+
+static bool CreateSSD(ImageFilterLeaf *ifl, DrawOperation *draw) {
+  av_log(NULL, AV_LOG_INFO, "CreateSSD\n");
+  NpuModelLeaf *ssd = new NpuModelLeaf(0);
+  assert(ssd);
+
+  bool ret = ssd->Prepare("object_detect");
+  assert(ret);
+  ssd->draw = draw;
+  ssd->img_func = ssd_process;
+  ssd->show_func = ssd_draw;
+  ifl->AddLeaf(ssd);
+
+  return true;
+}
+#endif // HAVE_ROCKX
 
 static void quit_program(const char *func, int line) {
   av_log(NULL, AV_LOG_FATAL, "quit at %s : %d\n", func, line);
@@ -4816,6 +5579,38 @@ int main(int argc, char **argv) {
   join->set_frame_rate(frame_rate);
 
   std::list<LeafHandler *> leafs;
+
+  DrawOperation *draw = nullptr;
+#if HAVE_ROCKX
+  ImageFilterLeaf *ifl = nullptr;
+  if (FLAGS_processor == "npu" && FLAGS_npu_data_source == "none" &&
+      !FLAGS_npu_model_name.empty()) {
+    ifl = new ImageFilterLeaf(global_drm_fd);
+    assert(ifl);
+    ifl->func = bo_scale;
+    leafs.push_back(ifl);
+    join->AddLeaf(ifl);
+    if (!ifl->Prepare(2, FLAGS_npu_piece_width, FLAGS_npu_piece_height,
+                      Format::RGB))
+      QUIT_PROGRAM();
+    int num = 0;
+    if (FLAGS_npu_model_name == "dms") {
+      num = 2;
+    } else if (FLAGS_npu_model_name == "ssd") {
+      num = 1;
+    } else {
+      QUIT_PROGRAM();
+    }
+    draw = new DrawOperation(num);
+    assert(draw);
+    if (FLAGS_npu_model_name == "dms" && !CreateDMS(ifl, draw))
+      QUIT_PROGRAM();
+    if (FLAGS_npu_model_name == "ssd" && !CreateSSD(ifl, draw))
+      QUIT_PROGRAM();
+    ifl->StartLeafs();
+  }
+#endif // HAVE_ROCKX
+
   SDLFont *sdl_font = nullptr;
   SDLDisplayLeaf *sdlleaf = nullptr;
   DRMDisplayLeaf *drmleaf = nullptr;
@@ -4827,6 +5622,7 @@ int main(int argc, char **argv) {
     if (!drmleaf)
       QUIT_PROGRAM();
     if (drmleaf) {
+      drmleaf->sub_draw = draw;
       leafs.push_back(drmleaf);
       join->AddLeaf(drmleaf);
       if (!drmleaf->Prepare())
@@ -4953,6 +5749,12 @@ int main(int argc, char **argv) {
     delete lh;
   }
   av_log(NULL, AV_LOG_INFO, "stop leafs\n");
+
+#if HAVE_ROCKX
+  if (draw) {
+    delete draw;
+  }
+#endif
 
   if (restore_tty)
     tcsetattr(0, TCSANOW, &oldtty);

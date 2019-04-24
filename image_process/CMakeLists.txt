@@ -29,12 +29,21 @@ if (DEFINED SDL_GLES2FUNCS_H_DIR)
 endif()
 
 set(RK_IMAGE_PROCESS_LINK_LIBRARIES
-    drm gflags avutil avformat avcodec rga SDL2 SDL2_ttf v4l2)
+    drm gflags avutil avformat avcodec rga SDL2 SDL2_ttf SDL2_gfx v4l2)
 option(RKNNCASCADE "compile RknnCascade" OFF)
 if(RKNNCASCADE)
     add_definitions(-DRKNNCASCADE=1)
     set(RK_IMAGE_PROCESS_LINK_LIBRARIES ${RK_IMAGE_PROCESS_LINK_LIBRARIES}
                                         rknncascade)
+endif()
+
+option(ROCKX "using rockx" OFF)
+if (ROCKX)
+include_directories(rockx/include)
+link_directories(rockx/lib64)
+add_definitions(-DHAVE_ROCKX=1)
+set(RK_IMAGE_PROCESS_LINK_LIBRARIES ${RK_IMAGE_PROCESS_LINK_LIBRARIES}
+                                    rockx rknn_api)
 endif()
 
 set(RK_IMAGE_PROCESS_SRC image_process.cc)
@@ -51,6 +60,10 @@ target_link_libraries(rk_image_process ${RK_IMAGE_PROCESS_LINK_LIBRARIES})
 install(TARGETS rk_image_process RUNTIME DESTINATION "bin")
 install(DIRECTORY ./ DESTINATION "bin"
         FILES_MATCHING PATTERN "*.sh"
+        PATTERN "rockx" EXCLUDE
+        PATTERN "CMakeFiles" EXCLUDE
         PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
         GROUP_READ GROUP_WRITE GROUP_EXECUTE
         WORLD_READ WORLD_WRITE WORLD_EXECUTE)
+
+# install(DIRECTORY rockx/models DESTINATION "share/rockx")
