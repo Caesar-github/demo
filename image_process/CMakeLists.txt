@@ -59,11 +59,10 @@ target_link_libraries(rk_image_process ${RK_IMAGE_PROCESS_LINK_LIBRARIES})
 
 install(TARGETS rk_image_process RUNTIME DESTINATION "bin")
 install(DIRECTORY ./ DESTINATION "bin"
+        USE_SOURCE_PERMISSIONS
         FILES_MATCHING PATTERN "*.sh"
         PATTERN "rockx" EXCLUDE
         PATTERN "CMakeFiles" EXCLUDE
-        PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
-        GROUP_READ GROUP_WRITE GROUP_EXECUTE
-        WORLD_READ WORLD_WRITE WORLD_EXECUTE)
+        )
 
 # install(DIRECTORY rockx/models DESTINATION "share/rockx")

@@ -1158,6 +1158,7 @@ void CameraInput::Run() {
       if (dump_fd == -1) {
         dump_fd = open(name, O_RDWR | O_CREAT | O_CLOEXEC);
         assert(dump_fd >= 0);
+        printf("open %s\n", name);
       }
       int len = width * height * 2;
       frame_num++;
@@ -1165,8 +1166,11 @@ void CameraInput::Run() {
       if (frame_num >= 500 && frame_num <= 750) {
         write(dump_fd, jb->bo.ptr, len);
       } else if (frame_num > 750) {
-          if (dump_fd >= 0)
+          if (dump_fd >= 0) {
             close(dump_fd);
+            sync();
+            printf("close %s\n", name);
+          }
           dump_fd = -2;
       }
 #endif
