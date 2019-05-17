@@ -50,7 +50,7 @@
 #define FONT_FILE_PATH "/usr/lib/fonts/DejaVuSansMono.ttf"
 #define LOGO_FILE_PATH "/userdata/logo.png"
 
-enum class Format { NV12, NV16, RGB, RGBX, YUYV };
+enum class Format { NV12, NV16, RGB, RGBX, YUYV, YU12 };
 typedef std::underlying_type<Format>::type FormatType;
 #define DEFAULT_JOIN_FORMAT static_cast<FormatType>(Format::RGB)
 
@@ -82,11 +82,12 @@ DEFINE_string(input, "", "input paths. separate each path by space.");
 DEFINE_uint32(input_width, 1280, "input width, such for v4l2, default 1280");
 DEFINE_uint32(input_height, 720, "input height, such for v4l2, default 720");
 DEFINE_int32(input_format, -1,
-             "InputFormat: 0 nv12, 1 nv16, 2 rgb, 3 rgbx, 4 yuyv");
+             "InputFormat: 0 nv12, 1 nv16, 2 rgb, 3 rgbx, 4 yuyv, 5 yu12");
+DEFINE_string(v4l2_memory_type, "mmap", "v4l2 memory type, mmap or dma");
 DEFINE_uint32(width, WIDTH, "piece together width, default 4096");
 DEFINE_uint32(height, HEIGHT, "piece together height, default 2160");
 DEFINE_uint32(format, DEFAULT_JOIN_FORMAT,
-              "OutFormat: 0 nv12, 1 nv16, 2 rgb, 3 rgbx");
+              "OutFormat: 0 nv12, 1 nv16, 2 rgb, 3 rgbx, 4 yuyv, 5 yu12");
 DEFINE_int32(slice_num, SLICE_NUM, "piece num, default 4");
 DEFINE_uint32(join_round_buffer_num, JOIN_ROUND_BUFFER_NUM,
               "round buffer num for join, default 4");
@@ -104,6 +105,7 @@ static int get_rga_format(Format f) {
     rga_format_map[Format::NV16] = RK_FORMAT_YCrCb_422_SP;
     rga_format_map[Format::RGB] = RK_FORMAT_RGB_888;
     rga_format_map[Format::RGBX] = RK_FORMAT_RGBX_8888;
+    rga_format_map[Format::YU12] = RK_FORMAT_YCrCb_420_P;
   }
   auto it = rga_format_map.find(f);
   if (it != rga_format_map.end())
@@ -199,6 +201,8 @@ static int get_drm_fmt(Format f) {
   switch (f) {
   case Format::NV12:
     return DRM_FORMAT_NV12;
+  case Format::YU12:
+    return DRM_FORMAT_YUV420;
   case Format::NV16:
     return DRM_FORMAT_NV16;
   case Format::YUYV:
@@ -215,6 +219,8 @@ static int get_rga_format_bydrmfmt(uint32_t drm_fmt) {
   switch (drm_fmt) {
   case DRM_FORMAT_NV12:
     return RK_FORMAT_YCrCb_420_SP;
+  case DRM_FORMAT_YUV420:
+    return RK_FORMAT_YCrCb_420_P;
   case DRM_FORMAT_NV16:
     return RK_FORMAT_YCrCb_422_SP;
   case DRM_FORMAT_YUYV:
@@ -227,6 +233,8 @@ static Format get_format_bydrmfmt(uint32_t drm_fmt) {
   switch (drm_fmt) {
   case DRM_FORMAT_NV12:
     return Format::NV12;
+  case DRM_FORMAT_YUV420:
+    return Format::YU12;
   case DRM_FORMAT_NV16:
     return Format::NV16;
   case DRM_FORMAT_YUYV:
@@ -240,6 +248,7 @@ static Format get_format_bydrmfmt(uint32_t drm_fmt) {
 static int get_format_bits(Format f) {
   switch (f) {
   case Format::NV12:
+  case Format::YU12:
     return 12;
   case Format::NV16:
   case Format::YUYV:
@@ -743,6 +752,8 @@ static uint32_t get_v4l2_fmt(Format f) {
   switch (f) {
   case Format::NV12:
     return V4L2_PIX_FMT_NV12;
+  case Format::YU12:
+    return V4L2_PIX_FMT_YUV420;
   case Format::NV16:
     return V4L2_PIX_FMT_NV16;
   case Format::YUYV:
@@ -804,9 +815,11 @@ static int xioctl(int fd, int request, void *argp) {
 
 CameraInput::CameraInput(int drmfd, std::string path)
     : Input(path), capture_type(V4L2_BUF_TYPE_VIDEO_CAPTURE),
-      memory_type(V4L2_MEMORY_MMAP /* V4L2_MEMORY_MMAP, V4L2_MEMORY_DMABUF */),
-      drm_fd(drmfd), fd(-1), buffers_queued(0), width(FLAGS_input_width),
-      height(FLAGS_input_height), buffer_length(0) {}
+      memory_type(V4L2_MEMORY_MMAP), drm_fd(drmfd), fd(-1), buffers_queued(0),
+      width(FLAGS_input_width), height(FLAGS_input_height), buffer_length(0) {
+  if (FLAGS_v4l2_memory_type == "dma")
+    memory_type = V4L2_MEMORY_DMABUF;
+}
 
 CameraInput::~CameraInput() {
   for (JoinBO *jb : buffer_list) {
@@ -1036,7 +1049,7 @@ bool CameraInput::Prepare() {
       memset(jb, 0, sizeof(*jb));
       buffer_list.push_back(jb);
 
-      if (buffer_export(fd, capture_type, i, &dmafd) < 0) {
+      if (true || buffer_export(fd, capture_type, i, &dmafd) < 0) {
         av_log(NULL, AV_LOG_INFO, "%s buffer_export (%d): %m\n", device,
                (int)i);
         ptr = v4l2_mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED,
@@ -1340,11 +1353,13 @@ bool Join::Prepare(int w, int h, int slicenum, int buffernum) {
     Rect r;
     r.x = slice_w_end_gap + (slice_w + slice_w_gap) * (i % n);
     if (FLAGS_format == static_cast<FormatType>(Format::NV12) ||
+        FLAGS_format == static_cast<FormatType>(Format::YU12) ||
         FLAGS_format == static_cast<FormatType>(Format::NV16) ||
         FLAGS_format == static_cast<FormatType>(Format::YUYV))
       r.x = (r.x + 1) & (~1);
     r.y = slice_h_end_gap + (slice_h + slice_h_gap) * (i / n);
     if (FLAGS_format == static_cast<FormatType>(Format::NV12) ||
+        FLAGS_format == static_cast<FormatType>(Format::YU12) ||
         FLAGS_format == static_cast<FormatType>(Format::NV16) ||
         FLAGS_format == static_cast<FormatType>(Format::YUYV))
       r.y = (r.y + 1) & (~1);
@@ -1522,10 +1537,12 @@ bool Join::scale_frame_to(AVFrame *av_frame, JoinBO *jb, int index) {
 static void get_format_rational(Format f, int &num, int &den) {
   switch (f) {
   case Format::NV12:
+  case Format::YU12:
     num = 3;
     den = 2;
     break;
   case Format::NV16:
+  case Format::YUYV:
     num = 2;
     den = 1;
     break;
@@ -4967,7 +4984,8 @@ static int face_landmark_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
   rockx_face_landmark_t *landmark = (rockx_face_landmark_t *)npu_out;
 #if 1
   // let this leak
-  static SDL_Surface *sur_point = SDL_LoadBMP("/userdata/dot_mobilenet.bmp");
+  static SDL_Surface *sur_point =
+      SDL_LoadBMP("/usr/local/share/app_demo/resource/dot_mobilenet.bmp");
   assert(sur_point);
   SDL_Rect point_texture_dimension;
   SDL_Texture *point_texture =
@@ -5060,7 +5078,17 @@ static int pose_finger_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
       y1 *= scale_h;
       // printf("[%d, %d] x0, y0 (%f, %f); x1, y1 (%f, %f)\n", disp_w, disp_h,
       // x0, y0, x1, y1);
-      SDL_RenderDrawLine(render, x0, y0, x1, y1);
+      thickLineRGBA(render, x0, y0, x1, y1, 3, 255 /*b*/, 138 /*r*/, 78 /*g*/,
+                    255);
+    }
+  }
+  for (int i = 0; i < 21; i++) {
+    float x0 = finger->key_points[i].x;
+    float y0 = finger->key_points[i].y;
+    if (x0 > 0 && y0 > 0) {
+      x0 *= scale_w;
+      y0 *= scale_h;
+      filledCircleRGBA(render, x0, y0, 5, 255, 138, 78, 255);
     }
   }
   return 0;
@@ -5212,40 +5240,6 @@ static int pose_body_draw(void *npu_out, void *disp_ptr, int disp_w, int disp_h,
   return 0;
 }
 
-static bool CreateDMS(ImageFilterLeaf *ifl, DrawOperation *draw) {
-  av_log(NULL, AV_LOG_INFO, "CreateDMS\n");
-  bool ret;
-  NpuModelLeaf *dms_pose = new NpuModelLeaf(0);
-  assert(dms_pose);
-  if (false) {
-    ret = dms_pose->Prepare("pose_finger");
-    assert(ret);
-    dms_pose->draw = draw;
-    dms_pose->img_func = pose_finger_process;
-    dms_pose->show_func = pose_finger_draw;
-  } else {
-    ret = dms_pose->Prepare("pose_body");
-    assert(ret);
-    dms_pose->draw = draw;
-    dms_pose->img_func = pose_body_process;
-    dms_pose->show_func = pose_body_draw;
-  }
-  ifl->AddLeaf(dms_pose);
-
-  NpuModelLeaf *dms_face = new NpuModelLeaf(1);
-  assert(dms_face);
-  ret = dms_face->Prepare("face_landmark");
-  assert(ret);
-  dms_face->draw = draw;
-  dms_face->img_func = face_landmark_process;
-  dms_face->show_func = face_landmark_draw;
-  ifl->AddLeaf(dms_face);
-
-  // draw->gather_func =;
-
-  return true;
-}
-
 static void *ssd_process(std::vector<rockx_handle_t> &npu_handles,
                          rockx_image_t *input_image) {
   rockx_handle_t object_det_handle = npu_handles[0];
@@ -5319,20 +5313,52 @@ static int ssd_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
   return 0;
 }
 
-static bool CreateSSD(ImageFilterLeaf *ifl, DrawOperation *draw) {
-  av_log(NULL, AV_LOG_INFO, "CreateSSD\n");
-  NpuModelLeaf *ssd = new NpuModelLeaf(0);
-  assert(ssd);
+class mode_param {
+public:
+  std::string rockx_name;
+  npu_process img_func;
+  result_in show_func;
+};
 
-  bool ret = ssd->Prepare("object_detect");
-  assert(ret);
-  ssd->draw = draw;
-  ssd->img_func = ssd_process;
-  ssd->show_func = ssd_draw;
-  ifl->AddLeaf(ssd);
+static std::map<std::string, mode_param> model_map;
+
+static void AddModelToMap(std::string key, std::string rockx_name,
+                          npu_process img_func, result_in show_func) {
+  mode_param param;
+  param.rockx_name = rockx_name;
+  param.img_func = img_func;
+  param.show_func = show_func;
+  model_map[key] = param;
+}
+
+static bool CreateNpuModel(ImageFilterLeaf *ifl, DrawOperation *draw,
+                           std::list<std::string> model_names) {
+  if (model_map.empty()) {
+    AddModelToMap("ssd", "object_detect", ssd_process, ssd_draw);
+    AddModelToMap("pose_finger", "pose_finger", pose_finger_process,
+                  pose_finger_draw);
+    AddModelToMap("pose_body", "pose_body", pose_body_process, pose_body_draw);
+    AddModelToMap("face_landmark", "face_landmark", face_landmark_process,
+                  face_landmark_draw);
+  }
+  av_log(NULL, AV_LOG_INFO, "CreateNpuModel\n");
+  bool ret;
+  int index = 0;
+  for (auto &name : model_names) {
+    NpuModelLeaf *leaf = new NpuModelLeaf(index++);
+    assert(leaf);
+    mode_param param = model_map[name];
+    ret = leaf->Prepare(param.rockx_name);
+    assert(ret);
+    leaf->draw = draw;
+    leaf->img_func = param.img_func;
+    leaf->show_func = param.show_func;
+    ifl->AddLeaf(leaf);
+  }
 
   return true;
 }
+
 #endif // HAVE_ROCKX
 
 static void quit_program(const char *func, int line) {
@@ -5597,19 +5623,19 @@ int main(int argc, char **argv) {
     if (!ifl->Prepare(2, FLAGS_npu_piece_width, FLAGS_npu_piece_height,
                       Format::RGB))
       QUIT_PROGRAM();
-    int num = 0;
-    if (FLAGS_npu_model_name == "dms") {
-      num = 2;
-    } else if (FLAGS_npu_model_name == "ssd") {
-      num = 1;
-    } else {
+
+    std::list<std::string> model_names;
+    std::string mname;
+    std::istringstream mnameStream(FLAGS_npu_model_name);
+    while (std::getline(mnameStream, mname, '+'))
+      model_names.push_back(mname);
+    int num = model_names.size();
+    if (num == 0)
       QUIT_PROGRAM();
-    }
+
     draw = new DrawOperation(num);
     assert(draw);
-    if (FLAGS_npu_model_name == "dms" && !CreateDMS(ifl, draw))
-      QUIT_PROGRAM();
-    if (FLAGS_npu_model_name == "ssd" && !CreateSSD(ifl, draw))
+    if (!CreateNpuModel(ifl, draw, model_names))
       QUIT_PROGRAM();
     ifl->StartLeafs();
   }

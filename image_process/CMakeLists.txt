@@ -38,6 +38,7 @@ if(RKNNCASCADE)
 endif()
 
 option(ROCKX "using rockx" OFF)
+#option(ROCKX "using rockx" ON)
 if (ROCKX)
 include_directories(rockx/include)
 link_directories(rockx/lib64)
@@ -65,4 +66,8 @@ install(DIRECTORY ./ DESTINATION "bin"
         PATTERN "CMakeFiles" EXCLUDE
         )
 
+install(DIRECTORY resource DESTINATION "local/share/app_demo"
+        FILES_MATCHING PATTERN "*.bmp" PATTERN "*.png")
+install(DIRECTORY resource/ DESTINATION "share/applications"
+        FILES_MATCHING PATTERN "*.desktop")
 # install(DIRECTORY rockx/models DESTINATION "share/rockx")
