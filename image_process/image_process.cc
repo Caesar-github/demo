@@ -6,6 +6,7 @@
  */
 
 // #define _GNU_SOURCE
+#include <assert.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -50,9 +51,10 @@
 #define FONT_FILE_PATH "/usr/lib/fonts/DejaVuSansMono.ttf"
 #define LOGO_FILE_PATH "/userdata/logo.png"
 
-enum class Format { NV12, NV16, RGB, RGBX, YUYV, YU12 };
+enum class Format { NV12, NV16, RGB888, RGBX, YUYV, YU12, RGB565 };
+
 typedef std::underlying_type<Format>::type FormatType;
-#define DEFAULT_JOIN_FORMAT static_cast<FormatType>(Format::RGB)
+#define DEFAULT_JOIN_FORMAT static_cast<FormatType>(Format::RGB888)
 
 static int request_exit = 0;
 
@@ -81,13 +83,15 @@ DEFINE_bool(drm_raw8_mode, false, "drm transfer with raw8");
 DEFINE_string(input, "", "input paths. separate each path by space.");
 DEFINE_uint32(input_width, 1280, "input width, such for v4l2, default 1280");
 DEFINE_uint32(input_height, 720, "input height, such for v4l2, default 720");
-DEFINE_int32(input_format, -1,
-             "InputFormat: 0 nv12, 1 nv16, 2 rgb, 3 rgbx, 4 yuyv, 5 yu12");
+DEFINE_int32(
+    input_format, -1,
+    "InputFormat: 0 nv12, 1 nv16, 2 rgb888, 3 rgbx, 4 yuyv, 5 yu12, 6 rgb565");
 DEFINE_string(v4l2_memory_type, "mmap", "v4l2 memory type, mmap or dma");
 DEFINE_uint32(width, WIDTH, "piece together width, default 4096");
 DEFINE_uint32(height, HEIGHT, "piece together height, default 2160");
-DEFINE_uint32(format, DEFAULT_JOIN_FORMAT,
-              "OutFormat: 0 nv12, 1 nv16, 2 rgb, 3 rgbx, 4 yuyv, 5 yu12");
+DEFINE_uint32(
+    format, DEFAULT_JOIN_FORMAT,
+    "OutFormat: 0 nv12, 1 nv16, 2 rgb888, 3 rgbx, 4 yuyv, 5 yu12, 6 rgb565");
 DEFINE_int32(slice_num, SLICE_NUM, "piece num, default 4");
 DEFINE_uint32(join_round_buffer_num, JOIN_ROUND_BUFFER_NUM,
               "round buffer num for join, default 4");
@@ -103,9 +107,10 @@ static int get_rga_format(Format f) {
   if (rga_format_map.empty()) {
     rga_format_map[Format::NV12] = RK_FORMAT_YCrCb_420_SP;
     rga_format_map[Format::NV16] = RK_FORMAT_YCrCb_422_SP;
-    rga_format_map[Format::RGB] = RK_FORMAT_RGB_888;
+    rga_format_map[Format::RGB888] = RK_FORMAT_RGB_888;
     rga_format_map[Format::RGBX] = RK_FORMAT_RGBX_8888;
     rga_format_map[Format::YU12] = RK_FORMAT_YCrCb_420_P;
+    rga_format_map[Format::RGB565] = RK_FORMAT_RGB_565;
   }
   auto it = rga_format_map.find(f);
   if (it != rga_format_map.end())
@@ -207,7 +212,9 @@ static int get_drm_fmt(Format f) {
     return DRM_FORMAT_NV16;
   case Format::YUYV:
     return DRM_FORMAT_YUYV;
-  case Format::RGB:
+  case Format::RGB565:
+    return DRM_FORMAT_RGB565;
+  case Format::RGB888:
     return DRM_FORMAT_RGB888;
   case Format::RGBX:
     return DRM_FORMAT_XRGB8888;
@@ -223,6 +230,8 @@ static int get_rga_format_bydrmfmt(uint32_t drm_fmt) {
     return RK_FORMAT_YCrCb_420_P;
   case DRM_FORMAT_NV16:
     return RK_FORMAT_YCrCb_422_SP;
+  case DRM_FORMAT_RGB565:
+    return RK_FORMAT_RGB_565;
   case DRM_FORMAT_YUYV:
     return -1;
   }
@@ -239,6 +248,8 @@ static Format get_format_bydrmfmt(uint32_t drm_fmt) {
     return Format::NV16;
   case DRM_FORMAT_YUYV:
     return Format::YUYV;
+  case DRM_FORMAT_RGB565:
+    return Format::RGB565;
   default:
     break;
   }
@@ -252,8 +263,9 @@ static int get_format_bits(Format f) {
     return 12;
   case Format::NV16:
   case Format::YUYV:
+  case Format::RGB565:
     return 16;
-  case Format::RGB:
+  case Format::RGB888:
     return 24;
   case Format::RGBX:
     return 32;
@@ -739,9 +751,30 @@ static void FreeJoinBO(int drmfd, RockchipRga &rga, JoinBO *jb) {
   }
 }
 
+static void DumpJoinBOToFile(JoinBO *jb, char *file_path, int length,
+                             const int frame_start, const int frame_end,
+                             int &dump_fd, int &frame_num) {
+  if (dump_fd == -1) {
+    dump_fd = open(file_path, O_RDWR | O_CREAT | O_CLOEXEC);
+    assert(dump_fd >= 0);
+    printf("open %s\n", file_path);
+  }
+  frame_num++;
+  printf("frame_num : %d\n", frame_num);
+  if (frame_num >= frame_start && frame_num <= frame_end) {
+    write(dump_fd, jb->bo.ptr, length);
+  } else if (frame_num > frame_end) {
+    if (dump_fd >= 0) {
+      close(dump_fd);
+      sync();
+      printf("close %s\n", file_path);
+    }
+    dump_fd = -2;
+  }
+}
+
 #define USE_LIBV4L2
 
-#include <assert.h>
 #include <linux/videodev2.h>
 #ifdef USE_LIBV4L2
 #include <libv4l2.h>
@@ -1164,28 +1197,12 @@ void CameraInput::Run() {
 
     PushFrame(frame);
 #if 0
-      static char name[64];
-      static int dump_fd = -1;
-      static int frame_num = 0;
-      sprintf(name, "/tmp/camera_dump.nv16");
-      if (dump_fd == -1) {
-        dump_fd = open(name, O_RDWR | O_CREAT | O_CLOEXEC);
-        assert(dump_fd >= 0);
-        printf("open %s\n", name);
-      }
-      int len = width * height * 2;
-      frame_num++;
-      printf("frame_num : %d\n", frame_num);
-      if (frame_num >= 500 && frame_num <= 750) {
-        write(dump_fd, jb->bo.ptr, len);
-      } else if (frame_num > 750) {
-          if (dump_fd >= 0) {
-            close(dump_fd);
-            sync();
-            printf("close %s\n", name);
-          }
-          dump_fd = -2;
-      }
+    static int dump_fd = -1;
+    static int frame_num = 0;
+    char *path = "/tmp/camera_dump.nv16";
+    printf("width, height : %d, %d\n", width, height);
+    DumpJoinBOToFile(jb, path, width * height * 2, 500, 650,
+                     dump_fd, frame_num);
 #endif
   }
 }
@@ -1487,8 +1504,15 @@ void push_frame(Join *jn, int index, std::shared_ptr<AVFrame> f) {
 
 bool Join::scale_frame_to(AVFrame *av_frame, JoinBO *jb, int index) {
   static int dst_format = get_rga_format(static_cast<Format>(FLAGS_format));
+  if (av_frame->format == AV_PIX_FMT_NONE) {
+    av_log(NULL, AV_LOG_FATAL, "av_frame is pix_none!\n");
+    return false;
+  }
   if (av_frame->format != AV_PIX_FMT_DRM_PRIME) {
-    av_log(NULL, AV_LOG_FATAL, "ffmpeg with mpp is broken ?\n");
+    av_log(NULL, AV_LOG_FATAL,
+           "ffmpeg with mpp is broken ? "
+           "index: %d, av_frame->format: %d, AV_PIX_FMT_DRM_PRIME: %d\n",
+           index, av_frame->format, AV_PIX_FMT_DRM_PRIME);
     abort();
   }
   AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor *)av_frame->data[0];
@@ -1543,10 +1567,11 @@ static void get_format_rational(Format f, int &num, int &den) {
     break;
   case Format::NV16:
   case Format::YUYV:
+  case Format::RGB565:
     num = 2;
     den = 1;
     break;
-  case Format::RGB:
+  case Format::RGB888:
     num = 3;
     den = 1;
     break;
@@ -1810,8 +1835,8 @@ static const struct OpenGLFormatDesc {
   GLenum format;
   GLenum type;
 } opengl_format_desc[] = {
-    {Format::RGB, AV_PIX_FMT_RGB24, &OPENGL_FRAGMENT_SHADER_RGB_PACKET, GL_RGB,
-     GL_UNSIGNED_BYTE},
+    {Format::RGB888, AV_PIX_FMT_RGB24, &OPENGL_FRAGMENT_SHADER_RGB_PACKET,
+     GL_RGB, GL_UNSIGNED_BYTE},
     {Format::RGBX, AV_PIX_FMT_RGBA, &OPENGL_FRAGMENT_SHADER_RGBA_PACKET,
      GL_RGBA, GL_UNSIGNED_BYTE}
     // TODO: Format::NV12
@@ -1907,7 +1932,7 @@ static AVPixelFormat get_av_pixel_fmt(Format f) {
     return AV_PIX_FMT_NV12;
   case Format::NV16:
     return AV_PIX_FMT_NV16;
-  case Format::RGB:
+  case Format::RGB888:
     return AV_PIX_FMT_RGB24;
   case Format::RGBX:
     return AV_PIX_FMT_RGBA;
@@ -2450,7 +2475,7 @@ static int get_sdl_format(Format f) {
   static std::map<Format, int> sdl_format_map;
   if (sdl_format_map.empty()) {
     sdl_format_map[Format::NV12] = SDL_PIXELFORMAT_NV12;
-    sdl_format_map[Format::RGB] = SDL_PIXELFORMAT_RGB24;
+    sdl_format_map[Format::RGB888] = SDL_PIXELFORMAT_RGB24;
     sdl_format_map[Format::RGBX] = SDL_PIXELFORMAT_RGBX8888;
   }
   auto it = sdl_format_map.find(f);
@@ -4445,6 +4470,14 @@ void DRMDisplayLeaf::SubRun() {
     } else {
       render_jb = sjb;
     }
+#if 0
+    static int dump_fd = -1;
+    static int frame_num = 0;
+    char *path = "/tmp/dump.yuyv";
+    DumpJoinBOToFile(render_jb.get(), path,
+                     render_jb->width * render_jb->height * 2, 300, 450,
+                     dump_fd, frame_num);
+#endif
     std::pair<uint32_t, bool> &render_fb =
         get_fb_id(dev.fd, jb_fb_map, render_jb.get());
     render_fb_id = render_fb.first;
@@ -4466,8 +4499,8 @@ void DRMDisplayLeaf::SubRun() {
     }
     if (!render_fb.second)
       continue;
-    // cur_jb_id = render_jb_id;
-    // printf("drmModePageFlip fb id = %d\n", render_fb_id);
+    if (FLAGS_debug)
+      printf("!!! drmModePageFlip fb id = %d\n", render_fb_id);
     //!! drmModeSetPlane work some problems with drmModePageFlip
     ret = drmModePageFlip(dev.fd, crtc_id, render_fb_id,
                           DRM_MODE_PAGE_FLIP_EVENT, &waiting_for_flip);
