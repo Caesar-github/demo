@@ -760,8 +760,8 @@ static void DumpJoinBOToFile(JoinBO *jb, char *file_path, int length,
     printf("open %s\n", file_path);
   }
   frame_num++;
-  printf("frame_num : %d\n", frame_num);
   if (frame_num >= frame_start && frame_num <= frame_end) {
+    printf("frame_num : %d\n", frame_num);
     write(dump_fd, jb->bo.ptr, length);
   } else if (frame_num > frame_end) {
     if (dump_fd >= 0) {
@@ -4488,8 +4488,12 @@ void DRMDisplayLeaf::SubRun() {
     //        render_jb->width, render_jb->height);
     if (!render_fb.second) {
       static Format f = static_cast<Format>(FLAGS_format);
-      int w = FLAGS_drm_raw8_mode ? render_jb->width * 8 / get_format_bits(f)
+      int w = FLAGS_drm_raw8_mode ? render_jb->width * get_format_bits(f) / 8
                                   : render_jb->width;
+      av_log(NULL, AV_LOG_INFO,
+             "drmModeSetPlane www: %d; render_jb->width: %d; "
+             "get_format_bits(f): %d\n",
+             w, render_jb->width, get_format_bits(f));
       ret = drmModeSetPlane(dev.fd, plane_id, crtc_id, render_fb_id, 0, 0, 0, w,
                             render_jb->height, 0, 0, w << 16,
                             render_jb->height << 16);
