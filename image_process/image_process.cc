@@ -3426,7 +3426,7 @@ typedef int (*result_in)(void *npu_out, void *disp_ptr, int disp_w, int disp_h,
                          SDL_Renderer *render);
 class NpuModelLeaf : public LeafHandler {
 public:
-  NpuModelLeaf(int draw_idx);
+  NpuModelLeaf(int draw_idx, int64_t timeout);
   virtual ~NpuModelLeaf();
   bool Prepare(std::string model_name);
   virtual void SubRun() override;
@@ -3437,6 +3437,7 @@ public:
   DrawOperation *draw;
   result_in show_func;
   int draw_index;
+  int64_t disp_timeout;
 };
 
 class NpuResult {
@@ -4861,9 +4862,9 @@ static bool bo_scale(JoinBO *in, JoinBO *out) {
 }
 
 #if HAVE_ROCKX
-NpuModelLeaf::NpuModelLeaf(int draw_idx)
+NpuModelLeaf::NpuModelLeaf(int draw_idx, int64_t timeout)
     : img_func(nullptr), draw(nullptr), show_func(nullptr),
-      draw_index(draw_idx) {}
+      draw_index(draw_idx), disp_timeout(timeout) {}
 
 NpuModelLeaf::~NpuModelLeaf() {
   for (auto handle : npu_handles)
@@ -4876,16 +4877,11 @@ bool NpuModelLeaf::Prepare(std::string model_name) {
   size_t config_size = 0;
   if (model_name == "face_landmark") {
     models.push_back(ROCKX_MODULE_FACE_DETECTION);
-    models.push_back(ROCKX_MODULE_FACE_LANDMARK);
-  } else if (model_name == "pose_finger") {
-    models.push_back(ROCKX_MODULE_POSE_FINGER);
-    rockx_config_finger_t *cfg =
-        (rockx_config_finger_t *)malloc(sizeof(rockx_config_finger_t));
-    assert(cfg);
-    memset(cfg, 0, sizeof(*cfg));
-    cfg->algo = 1;
-    config = cfg;
-    config_size = sizeof(*cfg);
+    models.push_back(ROCKX_MODULE_FACE_LANDMARK_68);
+  } else if (model_name == "pose_finger21") {
+    models.push_back(ROCKX_MODULE_POSE_FINGER_21);
+  } else if (model_name == "pose_finger3") {
+    models.push_back(ROCKX_MODULE_POSE_FINGER_3);
   } else if (model_name == "pose_body") {
     models.push_back(ROCKX_MODULE_POSE_BODY);
   } else if (model_name == "object_detect") {
@@ -4933,6 +4929,7 @@ void NpuModelLeaf::SubRun() {
       auto nr = std::make_shared<NpuResult>();
       nr->leaf = this;
       nr->npu_out = npu_out;
+      nr->timeout = disp_timeout;
       nr->index = draw_index;
       draw->Set(draw_index, nr);
     }
@@ -4957,8 +4954,8 @@ static SDL_Texture *load_texture(SDL_Surface *sur, SDL_Renderer *render,
 static void *face_landmark_process(std::vector<rockx_handle_t> &npu_handles,
                                    rockx_image_t *input_image) {
   rockx_handle_t face_det_handle = npu_handles[0];
-  rockx_face_array_t face_array;
-  memset(&face_array, 0, sizeof(rockx_face_array_t));
+  rockx_object_array_t face_array;
+  memset(&face_array, 0, sizeof(rockx_object_array_t));
 
   rockx_ret_t ret =
       rockx_face_detect(face_det_handle, input_image, &face_array, nullptr);
@@ -4967,10 +4964,10 @@ static void *face_landmark_process(std::vector<rockx_handle_t> &npu_handles,
     return nullptr;
   }
   // select the max big face
-  rockx_face_t face;
+  rockx_object_t face;
   int area = 0;
   for (int i = 0; i < face_array.count; i++) {
-    rockx_face_t &f = face_array.face[i];
+    rockx_object_t &f = face_array.object[i];
     int left = f.box.left;
     int top = f.box.top;
     int right = f.box.right;
@@ -5071,13 +5068,14 @@ static int face_landmark_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
 static void *pose_finger_process(std::vector<rockx_handle_t> &npu_handles,
                                  rockx_image_t *input_image) {
   rockx_handle_t pose_finger_handle = npu_handles[0];
-  rockx_finger_t *finger = (rockx_finger_t *)malloc(sizeof(rockx_finger_t));
+  rockx_keypoints_t *finger =
+      (rockx_keypoints_t *)malloc(sizeof(rockx_keypoints_t));
   assert(finger);
-  memset(finger, 0, sizeof(rockx_finger_t));
+  memset(finger, 0, sizeof(rockx_keypoints_t));
 
   rockx_ret_t ret = rockx_pose_finger(pose_finger_handle, input_image, finger);
   if (ret != ROCKX_RET_SUCCESS) {
-    printf("rockx_pose_finger error %d\n", ret);
+    printf("rockx_pose_finger21 error %d\n", ret);
     free(finger);
     return nullptr;
   }
@@ -5091,23 +5089,34 @@ static void *pose_finger_process(std::vector<rockx_handle_t> &npu_handles,
 
 static int pose_finger_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
                             int disp_h, SDL_Renderer *render) {
-  static const std::vector<std::pair<int, int>> posePairs = {
+  static const std::vector<std::pair<int, int>> posePairs21 = {
       {0, 1},   {1, 2},   {2, 3},  {3, 4},   {0, 5},   {5, 6},  {6, 7},
       {7, 8},   {0, 9},   {9, 10}, {10, 11}, {11, 12}, {0, 13}, {13, 14},
       {14, 15}, {15, 16}, {0, 17}, {17, 18}, {18, 19}, {19, 20}};
+  static const std::vector<std::pair<int, int>> posePairs3 = {{0, 1}, {1, 2}};
   static int w = FLAGS_npu_piece_width;
   static int h = FLAGS_npu_piece_height;
   SDL_SetRenderDrawBlendMode(render, SDL_BLENDMODE_NONE);
   SDL_SetRenderDrawColor(render, 0xFF, 0x06, 0xEB, 0xFF);
   static float scale_w = (float)disp_w / w;
   static float scale_h = (float)disp_h / h;
-  rockx_finger_t *finger = (rockx_finger_t *)npu_out;
-  for (size_t j = 0; j < posePairs.size(); j++) {
-    const std::pair<int, int> &posePair = posePairs[j];
-    float x0 = finger->key_points[posePair.first].x;
-    float y0 = finger->key_points[posePair.first].y;
-    float x1 = finger->key_points[posePair.second].x;
-    float y1 = finger->key_points[posePair.second].y;
+  rockx_keypoints_t *finger = (rockx_keypoints_t *)npu_out;
+  // printf("finger count: %d\n", finger->count);
+  const std::vector<std::pair<int, int>> *posePairs = nullptr;
+  int thick = 3;
+  if (finger->count == 21) {
+    posePairs = &posePairs21;
+  } else if (finger->count == 3) {
+    posePairs = &posePairs3;
+    thick = 9;
+  } else
+    return -1;
+  for (size_t j = 0; j < posePairs->size(); j++) {
+    const std::pair<int, int> &posePair = (*posePairs)[j];
+    float x0 = finger->points[posePair.first].x;
+    float y0 = finger->points[posePair.first].y;
+    float x1 = finger->points[posePair.second].x;
+    float y1 = finger->points[posePair.second].y;
     if (x0 > 0 && y0 > 0 && x1 > 0 && y1 > 0) {
       x0 *= scale_w;
       y0 *= scale_h;
@@ -5115,17 +5124,17 @@ static int pose_finger_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
       y1 *= scale_h;
       // printf("[%d, %d] x0, y0 (%f, %f); x1, y1 (%f, %f)\n", disp_w, disp_h,
       // x0, y0, x1, y1);
-      thickLineRGBA(render, x0, y0, x1, y1, 3, 255 /*b*/, 138 /*r*/, 78 /*g*/,
-                    255);
+      thickLineRGBA(render, x0, y0, x1, y1, thick, 255 /*b*/, 138 /*r*/,
+                    78 /*g*/, 255);
     }
   }
-  for (int i = 0; i < 21; i++) {
-    float x0 = finger->key_points[i].x;
-    float y0 = finger->key_points[i].y;
+  for (int i = 0; i < finger->count; i++) {
+    float x0 = finger->points[i].x;
+    float y0 = finger->points[i].y;
     if (x0 > 0 && y0 > 0) {
       x0 *= scale_w;
       y0 *= scale_h;
-      filledCircleRGBA(render, x0, y0, 5, 255, 138, 78, 255);
+      filledCircleRGBA(render, x0, y0, thick + 3, 255, 138, 78, 255);
     }
   }
   return 0;
@@ -5134,10 +5143,11 @@ static int pose_finger_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
 static void *pose_body_process(std::vector<rockx_handle_t> &npu_handles,
                                rockx_image_t *input_image) {
   rockx_handle_t pose_body_handle = npu_handles[0];
-  rockx_body_array_t body_array;
-  memset(&body_array, 0, sizeof(rockx_body_array_t));
+  rockx_keypoints_array_t body_array;
+  memset(&body_array, 0, sizeof(rockx_keypoints_array_t));
 
-  rockx_ret_t ret = rockx_pose_body(pose_body_handle, input_image, &body_array);
+  rockx_ret_t ret =
+      rockx_pose_body(pose_body_handle, input_image, &body_array, nullptr);
   if (ret != ROCKX_RET_SUCCESS) {
     printf("rockx_pose_body error %d\n", ret);
     return nullptr;
@@ -5150,11 +5160,11 @@ static void *pose_body_process(std::vector<rockx_handle_t> &npu_handles,
   int index = -1;
   float area = 0;
   for (int i = 0; i < body_array.count; i++) {
-    rockx_body_t &body = body_array.body[i];
+    rockx_keypoints_t &body = body_array.keypoints[i];
     float l = 0, t = 0, r = 0, b = 0;
     for (int j = 0; j < body.count; j++) {
-      float x = body.key_points[j].x;
-      float y = body.key_points[j].y;
+      float x = body.points[j].x;
+      float y = body.points[j].y;
       if (x < 0)
         x = 0;
       if (y < 0)
@@ -5179,12 +5189,12 @@ static void *pose_body_process(std::vector<rockx_handle_t> &npu_handles,
     // printf("\n[%d]::\nl,t,r,b : %f,%f,%f,%f; a:%f\n\n", i, l,t,r,b, area);
   }
 
-  rockx_body_t *ret_body = nullptr;
+  rockx_keypoints_t *ret_body = nullptr;
   if (index >= 0 && area > 8) {
-    ret_body = (rockx_body_t *)malloc(sizeof(rockx_body_t));
+    ret_body = (rockx_keypoints_t *)malloc(sizeof(rockx_keypoints_t));
     if (!ret_body)
       return nullptr;
-    *ret_body = body_array.body[index];
+    *ret_body = body_array.keypoints[index];
   }
 
   return ret_body;
@@ -5202,13 +5212,13 @@ static int pose_body_draw(void *npu_out, void *disp_ptr, int disp_w, int disp_h,
   // SDL_SetRenderDrawColor(render, 0xFF, 0x06, 0xEB, 0xFF);
   static float scale_w = (float)disp_w / w;
   static float scale_h = (float)disp_h / h;
-  rockx_body_t *body = (rockx_body_t *)npu_out;
+  rockx_keypoints_t *body = (rockx_keypoints_t *)npu_out;
   for (size_t j = 0; j < posePairs.size(); j++) {
     const std::pair<int, int> &posePair = posePairs[j];
-    float x0 = body->key_points[posePair.first].x;
-    float y0 = body->key_points[posePair.first].y;
-    float x1 = body->key_points[posePair.second].x;
-    float y1 = body->key_points[posePair.second].y;
+    float x0 = body->points[posePair.first].x;
+    float y0 = body->points[posePair.first].y;
+    float x1 = body->points[posePair.second].x;
+    float y1 = body->points[posePair.second].y;
     if (x0 > 0 && y0 > 0 && x1 > 0 && y1 > 0) {
       x0 *= scale_w;
       y0 *= scale_h;
@@ -5221,8 +5231,8 @@ static int pose_body_draw(void *npu_out, void *disp_ptr, int disp_w, int disp_h,
     }
   }
   for (int i = 0; i < body->count; i++) {
-    float x0 = body->key_points[i].x;
-    float y0 = body->key_points[i].y;
+    float x0 = body->points[i].x;
+    float y0 = body->points[i].y;
     if (x0 > 0 && y0 > 0) {
       x0 *= scale_w;
       y0 *= scale_h;
@@ -5230,14 +5240,14 @@ static int pose_body_draw(void *npu_out, void *disp_ptr, int disp_w, int disp_h,
     }
   }
   // crop
-  float x2 = body->key_points[2].x;
-  float y2 = body->key_points[2].y;
-  float x5 = body->key_points[5].x;
-  float y5 = body->key_points[5].y;
-  float x4 = body->key_points[4].x;
-  float y4 = body->key_points[4].y;
-  float x7 = body->key_points[7].x;
-  float y7 = body->key_points[7].y;
+  float x2 = body->points[2].x;
+  float y2 = body->points[2].y;
+  float x5 = body->points[5].x;
+  float y5 = body->points[5].y;
+  float x4 = body->points[4].x;
+  float y4 = body->points[4].y;
+  float x7 = body->points[7].x;
+  float y7 = body->points[7].y;
   if (((x2 > 0 && y2 > 0) || (x5 > 0 && y5 > 0)) &&
       ((x4 > 0 && y4 > 0) || (x7 > 0 && y7 > 0))) {
     float jian_y = h;
@@ -5322,7 +5332,8 @@ static int ssd_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
     int right = object_array->object[i].box.right;
     int bottom = object_array->object[i].box.bottom;
     // int cls_idx = object_array->object[i].cls_idx;
-    const char *cls_name = object_array->object[i].cls_name;
+    const char *cls_name =
+        OBJECT_DETECTION_LABELS_91[object_array->object[i].cls_idx];
     // float score = object_array->object[i].score;
     // printf("~~~ box=(%d %d %d %d) cls_name=%s, score=%f\n", left, top, right,
     // bottom, cls_name, score);
@@ -5355,36 +5366,42 @@ public:
   std::string rockx_name;
   npu_process img_func;
   result_in show_func;
+  int64_t disp_timeout;
 };
 
 static std::map<std::string, mode_param> model_map;
 
 static void AddModelToMap(std::string key, std::string rockx_name,
-                          npu_process img_func, result_in show_func) {
+                          npu_process img_func, result_in show_func,
+                          int64_t disp_timeout) {
   mode_param param;
   param.rockx_name = rockx_name;
   param.img_func = img_func;
   param.show_func = show_func;
+  param.disp_timeout = disp_timeout;
   model_map[key] = param;
 }
 
 static bool CreateNpuModel(ImageFilterLeaf *ifl, DrawOperation *draw,
                            std::list<std::string> model_names) {
   if (model_map.empty()) {
-    AddModelToMap("ssd", "object_detect", ssd_process, ssd_draw);
-    AddModelToMap("pose_finger", "pose_finger", pose_finger_process,
-                  pose_finger_draw);
-    AddModelToMap("pose_body", "pose_body", pose_body_process, pose_body_draw);
+    AddModelToMap("ssd", "object_detect", ssd_process, ssd_draw, 300);
+    AddModelToMap("pose_finger21", "pose_finger21", pose_finger_process,
+                  pose_finger_draw, 300);
+    AddModelToMap("pose_finger3", "pose_finger3", pose_finger_process,
+                  pose_finger_draw, 2000);
+    AddModelToMap("pose_body", "pose_body", pose_body_process, pose_body_draw,
+                  300);
     AddModelToMap("face_landmark", "face_landmark", face_landmark_process,
-                  face_landmark_draw);
+                  face_landmark_draw, 300);
   }
   av_log(NULL, AV_LOG_INFO, "CreateNpuModel\n");
   bool ret;
   int index = 0;
   for (auto &name : model_names) {
-    NpuModelLeaf *leaf = new NpuModelLeaf(index++);
-    assert(leaf);
     mode_param param = model_map[name];
+    NpuModelLeaf *leaf = new NpuModelLeaf(index++, param.disp_timeout);
+    assert(leaf);
     ret = leaf->Prepare(param.rockx_name);
     assert(ret);
     leaf->draw = draw;
@@ -5658,7 +5675,7 @@ int main(int argc, char **argv) {
     leafs.push_back(ifl);
     join->AddLeaf(ifl);
     if (!ifl->Prepare(2, FLAGS_npu_piece_width, FLAGS_npu_piece_height,
-                      Format::RGB))
+                      Format::RGB888))
       QUIT_PROGRAM();
 
     std::list<std::string> model_names;
