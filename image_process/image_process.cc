@@ -755,7 +755,7 @@ static void DumpJoinBOToFile(JoinBO *jb, char *file_path, int length,
                              const int frame_start, const int frame_end,
                              int &dump_fd, int &frame_num) {
   if (dump_fd == -1) {
-    dump_fd = open(file_path, O_RDWR | O_CREAT | O_CLOEXEC);
+    dump_fd = open(file_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     assert(dump_fd >= 0);
     printf("open %s\n", file_path);
   }
@@ -1610,7 +1610,7 @@ void DummyLeaf::SubRun() {
         static char file_path[128];
         snprintf(file_path, sizeof(file_path), "/userdata/%d.image",
                  ++file_num);
-        int fd = open(file_path, O_RDWR | O_CREAT | O_CLOEXEC);
+        int fd = open(file_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
         if (fd >= 0) {
           write(fd, jb->bo.ptr, jb->width * jb->height * bpp_num / bpp_den);
           close(fd);
