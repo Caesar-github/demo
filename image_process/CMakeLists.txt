@@ -38,10 +38,8 @@ if(RKNNCASCADE)
 endif()
 
 option(ROCKX "using rockx" OFF)
-#option(ROCKX "using rockx" ON)
 if (ROCKX)
-include_directories(rockx/include)
-link_directories(rockx/lib64)
+include_directories(${ROCKX_HERDER_DIR})
 add_definitions(-DHAVE_ROCKX=1)
 set(RK_IMAGE_PROCESS_LINK_LIBRARIES ${RK_IMAGE_PROCESS_LINK_LIBRARIES}
                                     rockx rknn_api)

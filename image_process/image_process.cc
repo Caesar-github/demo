@@ -3417,7 +3417,7 @@ void SDLDisplayLeaf::SubRun() {
 
 #if HAVE_ROCKX
 
-#include "rockx/include/rockx.h"
+#include <rockx.h>
 
 class DrawOperation;
 typedef void *(*npu_process)(std::vector<rockx_handle_t> &npu_handles,
