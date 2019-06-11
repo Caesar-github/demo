@@ -66,6 +66,7 @@ install(DIRECTORY ./ DESTINATION "bin"
 
 install(DIRECTORY resource DESTINATION "local/share/app_demo"
         FILES_MATCHING PATTERN "*.bmp" PATTERN "*.png")
+if (ROCKX)
 install(DIRECTORY resource/ DESTINATION "share/applications"
         FILES_MATCHING PATTERN "*.desktop")
-# install(DIRECTORY rockx/models DESTINATION "share/rockx")
+endif()
