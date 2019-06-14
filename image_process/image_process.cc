@@ -936,6 +936,16 @@ bool CameraInput::Prepare() {
   struct v4l2_streamparm setfps;
   enum v4l2_buf_type type = capture_type;
 
+  static char media_ctl_str[128] = {0};
+
+  if (media_ctl_str[0] == 0) {
+    snprintf(media_ctl_str, sizeof(media_ctl_str),
+             "media-ctl -vvv -d /dev/media0 --set-v4l2 \'\"jaguar1 "
+             "3-0030\":0[fmt:UYVY8_2X8/%dx%d]\'",
+             w, h);
+    system(media_ctl_str);
+  }
+
   fd = v4l2_open(device, O_RDWR, 0);
   if (fd < 0) {
     av_log(NULL, AV_LOG_ERROR, "open %s failed %m\n", device);
