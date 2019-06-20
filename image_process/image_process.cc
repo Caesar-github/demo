@@ -307,7 +307,7 @@ public:
   AVCodecContext *acc;
   double fps;
   AVRational tb;
-  std::mutex mtx;
+  std::mutex pkt_mtx;
   // std::condition_variable cond;
   std::list<AVPacket *> vpkt_list;
   std::thread *dec_thread;
@@ -443,14 +443,14 @@ fail:
 }
 
 void Input::PushPacket(AVPacket *pkt) {
-  std::lock_guard<std::mutex> lkg(mtx);
+  std::lock_guard<std::mutex> lkg(pkt_mtx);
   vpkt_list.push_back(pkt);
   // cond.notify_one();
 }
 
 AVPacket *Input::PopPacket() {
   AVPacket *pkt;
-  std::lock_guard<std::mutex> lkg(mtx);
+  std::lock_guard<std::mutex> lkg(pkt_mtx);
   if (vpkt_list.empty())
     return NULL;
   pkt = vpkt_list.front();
@@ -466,7 +466,7 @@ void Input::PushFrame(AVFrame *frm) {
 
 AVFrame *Input::PopFrame() {
   AVFrame *frm;
-  std::lock_guard<std::mutex> lkg(mtx);
+  std::lock_guard<std::mutex> lkg(frame_mtx);
   if (vfrm_list.empty())
     return NULL;
   frm = vfrm_list.front();

@@ -54,6 +54,9 @@ target_include_directories(rk_image_process
                            PUBLIC ${LIBAVUTIL_INCLUDE_DIRS}
                            PUBLIC ${LIBDRM_INCLUDE_DIRS}
                           )
+
+# add_definitions(-fsanitize=address -static-libasan -fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -g1)
+# target_link_libraries(rk_image_process asan)
 target_link_libraries(rk_image_process ${RK_IMAGE_PROCESS_LINK_LIBRARIES})
 
 install(TARGETS rk_image_process RUNTIME DESTINATION "bin")
