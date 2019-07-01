@@ -983,17 +983,10 @@ bool CameraInput::Prepare() {
   fmt.fmt.pix.pixelformat = get_v4l2_fmt(f);
   fmt.fmt.pix.field = V4L2_FIELD_ANY;
 
-  static bool specail_for_n4_yuyv = (f == Format::YUYV);
-
   if (fmt.fmt.pix.pixelformat == 0) {
     av_log(NULL, AV_LOG_ERROR, "unsupport input format : %d\n",
            FLAGS_input_format);
     goto fail;
-  }
-
-  if (specail_for_n4_yuyv) {
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_SRGGB8;
-    fmt.fmt.pix.width = 2 * w;
   }
 
   if (xioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
@@ -1002,18 +995,16 @@ bool CameraInput::Prepare() {
     goto fail;
   }
 
-  if (!specail_for_n4_yuyv) {
-    if (w != (int)fmt.fmt.pix.width || h != (int)fmt.fmt.pix.height) {
-      av_log(NULL, AV_LOG_WARNING, "%s change res from %dx%d to %dx%d\n",
-             device, w, h, fmt.fmt.pix.width, fmt.fmt.pix.height);
-      w = width = fmt.fmt.pix.width;
-      h = height = fmt.fmt.pix.height;
-    }
-    if (get_v4l2_fmt(f) != fmt.fmt.pix.pixelformat) {
-      av_log(NULL, AV_LOG_ERROR, "%s, expect %d, return %c%c%c%c\n", device,
-             FLAGS_input_format, DUMP_FOURCC(fmt.fmt.pix.pixelformat));
-      goto fail;
-    }
+  if (w != (int)fmt.fmt.pix.width || h != (int)fmt.fmt.pix.height) {
+    av_log(NULL, AV_LOG_WARNING, "%s change res from %dx%d to %dx%d\n", device,
+           w, h, fmt.fmt.pix.width, fmt.fmt.pix.height);
+    w = width = fmt.fmt.pix.width;
+    h = height = fmt.fmt.pix.height;
+  }
+  if (get_v4l2_fmt(f) != fmt.fmt.pix.pixelformat) {
+    av_log(NULL, AV_LOG_ERROR, "%s, expect %d, return %c%c%c%c\n", device,
+           FLAGS_input_format, DUMP_FOURCC(fmt.fmt.pix.pixelformat));
+    goto fail;
   }
 
   av_log(NULL, AV_LOG_INFO, "fmt.fmt.pix_mp.num_planes: %d\n",
@@ -1038,14 +1029,14 @@ bool CameraInput::Prepare() {
 
   memset(&req, 0, sizeof(req));
   req.type = type;
-  req.count = 4;
+  req.count = 8;
   req.memory = memory_type;
 
   if (xioctl(fd, VIDIOC_REQBUFS, &req) < 0) {
     av_log(NULL, AV_LOG_ERROR, "%s, ioctl(VIDIOC_REQBUFS): %m\n", device);
     goto fail;
   }
-  assert(req.count == 4);
+  assert(req.count == 8);
   // stream on
   if (memory_type == V4L2_MEMORY_DMABUF) {
     w = (w + 15) & (~15);
