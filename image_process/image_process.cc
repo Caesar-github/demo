@@ -1149,7 +1149,7 @@ void CameraInput::Run() {
       av_log(NULL, AV_LOG_ERROR, "%s, ioctl(VIDIOC_DQBUF): %m\n", device);
       break;
     }
-    assert(buf.index < 4);
+    assert(buf.index < 8);
     buf_ts = buf.timestamp;
     int queued_num = buffers_queued.fetch_add(-1);
     if (queued_num < 0)
