@@ -4887,6 +4887,10 @@ bool NpuModelLeaf::Prepare(std::string model_name) {
     models.push_back(ROCKX_MODULE_POSE_BODY);
   } else if (model_name == "object_detect") {
     models.push_back(ROCKX_MODULE_OBJECT_DETECTION);
+  } else if (model_name == "face_attribute") {
+     models.push_back(ROCKX_MODULE_FACE_DETECTION);
+     models.push_back(ROCKX_MODULE_FACE_LANDMARK_5);
+     models.push_back(ROCKX_MODULE_FACE_ANALYZE);
   } else {
     av_log(NULL, AV_LOG_FATAL, "TODO: %s\n", model_name.c_str());
     return false;
@@ -5362,6 +5366,129 @@ static int ssd_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
   return 0;
 }
 
+struct face_attribute_factor {
+  int left;
+  int top;
+  int right;
+  int bottom;
+  float score;
+  int gender;
+  int age;
+};
+struct face_attribute_value {
+   int count;
+   struct face_attribute_factor get_face_attribute_factor[128];
+};
+
+static void *face_attribute_process(std::vector<rockx_handle_t> &npu_handles,
+                         rockx_image_t *input_image) {
+
+  struct face_attribute_value *face_attribute_array =
+      (face_attribute_value *)malloc(sizeof(face_attribute_value));
+  assert(face_attribute_array);
+  memset(face_attribute_array, 0, sizeof(face_attribute_array));
+
+  rockx_handle_t face_det_handle = npu_handles[0];
+  rockx_handle_t face_5landmarks_handle = npu_handles[1];
+  rockx_handle_t face_attribute_handle = npu_handles[2];
+
+  rockx_object_array_t face_array;
+  memset(&face_array, 0, sizeof(rockx_object_array_t));
+
+  rockx_ret_t ret =
+      rockx_face_detect(face_det_handle, input_image, &face_array, nullptr);
+  if (ret != ROCKX_RET_SUCCESS) {
+    printf("rockx_face_detect error %d\n", ret);
+    return nullptr;
+  }
+
+  if (face_array.count == 0)
+    return nullptr;
+
+  /*************** FACE Landmark ***************/
+  rockx_image_t out_img;
+  out_img.width = 112;
+  out_img.height = 112;
+  out_img.pixel_format = ROCKX_PIXEL_FORMAT_RGB888;
+  out_img.data = (uint8_t*)malloc(112*112*3*sizeof(char));
+
+  /*************** FACE Gender Age***************/
+  rockx_face_attribute_t gender_age;
+  memset(&gender_age, 0, sizeof(rockx_face_attribute_t));
+  face_attribute_array->count = face_array.count;
+  for (int i = 0; i < face_array.count; i++) {
+      rockx_face_align(face_5landmarks_handle, input_image, &face_array.object[i].box, nullptr, &out_img);
+      ret = rockx_face_attribute(face_attribute_handle, &out_img, &gender_age);
+      face_attribute_array->get_face_attribute_factor[i].left = face_array.object[i].box.left;
+      face_attribute_array->get_face_attribute_factor[i].top = face_array.object[i].box.top;
+      face_attribute_array->get_face_attribute_factor[i].right = face_array.object[i].box.right;
+      face_attribute_array->get_face_attribute_factor[i].bottom = face_array.object[i].box.bottom;
+      face_attribute_array->get_face_attribute_factor[i].score = face_array.object[i].score;
+      face_attribute_array->get_face_attribute_factor[i].gender = gender_age.gender;
+      face_attribute_array->get_face_attribute_factor[i].age = gender_age.age;
+      //printf("faceid: %d\tgender: %d\tage: %d\n", i, gender_age.gender, gender_age.age);
+  }
+
+  free(out_img.data);
+  return face_attribute_array;
+}
+
+static int face_attribute_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
+                    int disp_h, SDL_Renderer *render) {
+  static int w = FLAGS_npu_piece_width;
+  static int h = FLAGS_npu_piece_height;
+  char gender_age[30];
+  char age[10];
+
+  static SDLFont *sdl_font = nullptr;
+  if (!sdl_font) {
+    // let this leak
+    sdl_font = new SDLFont(red, 40);
+    assert(sdl_font);
+  }
+
+  SDL_SetRenderDrawBlendMode(render, SDL_BLENDMODE_NONE);
+  SDL_SetRenderDrawColor(render, 0xFF, 0x10, 0xEB, 0xFF);
+  face_attribute_value *object_array = (face_attribute_value *)npu_out;
+  for (int i = 0; i < object_array->count; i++) {
+
+    /* drop result when score lower than 0.85 */
+    if (object_array->get_face_attribute_factor[i].score > 0.85) {
+      int left = object_array->get_face_attribute_factor[i].left;
+      int top = object_array->get_face_attribute_factor[i].top;
+      int right = object_array->get_face_attribute_factor[i].right;
+      int bottom = object_array->get_face_attribute_factor[i].bottom;
+      if (object_array->get_face_attribute_factor[i].gender)
+        strcpy(gender_age, "Gender: Man Age:");
+      else
+        strcpy(gender_age, "Gender: Women Age:");
+
+      snprintf(age, 10, "%d", object_array->get_face_attribute_factor[i].age);
+      strncat(gender_age, age, 10);
+
+      SDL_Rect rect = {left * disp_w / w, top * disp_h / h,
+                       (right - left) * disp_w / w, (bottom - top) * disp_h / h};
+      SDL_RenderDrawRect(render, &rect);
+      int fontw = 0, fonth = 0;
+      SDL_Surface *name = sdl_font->GetFontPicture(
+          (char *)gender_age, strlen(gender_age), 100, &fontw, &fonth);
+      if (name) {
+        SDL_Rect texture_dimension;
+        SDL_Texture *texture = load_texture(name, render, &texture_dimension);
+        SDL_FreeSurface(name);
+        SDL_Rect dst_dimension;
+        dst_dimension.x = rect.x;
+        dst_dimension.y = rect.y - 18;
+        dst_dimension.w = texture_dimension.w;
+        dst_dimension.h = texture_dimension.h;
+        SDL_RenderCopy(render, texture, &texture_dimension, &dst_dimension);
+        SDL_DestroyTexture(texture);
+      }
+    }
+  }
+  return 0;
+}
+
 class mode_param {
 public:
   std::string rockx_name;
@@ -5395,6 +5522,8 @@ static bool CreateNpuModel(ImageFilterLeaf *ifl, DrawOperation *draw,
                   300);
     AddModelToMap("face_landmark", "face_landmark", face_landmark_process,
                   face_landmark_draw, 300);
+    AddModelToMap("face_attribute", "face_attribute", face_attribute_process,
+                  face_attribute_draw, 300);
   }
   av_log(NULL, AV_LOG_INFO, "CreateNpuModel\n");
   bool ret;
