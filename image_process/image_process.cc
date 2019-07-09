@@ -3720,7 +3720,7 @@ public:
   JoinBO hdmi_jb;
   uint32_t hdmi_fb_id;
 
-  bool waiting_for_flip;
+  std::atomic_bool waiting_for_flip;
   drmEventContext drm_evctx;
 
   DrawOperation *sub_draw;
@@ -4352,7 +4352,7 @@ bool DRMDisplayLeaf::Prepare() {
 static void drm_flip_handler(int fd UNUSED, unsigned int frame UNUSED,
                              unsigned int sec UNUSED, unsigned int usec UNUSED,
                              void *data) {
-  *((bool *)data) = false;
+  ((DRMDisplayLeaf *)data)->waiting_for_flip = false;
 }
 
 bool DRMDisplayLeaf::WaitPageFlip(int timeout) {
@@ -4458,13 +4458,13 @@ void DRMDisplayLeaf::SubRun() {
       continue;
     if (sub_draw)
       sub_draw->Draw(jb->bo.ptr, jb->width, jb->height);
-    if (do_rga_blit) {
-      if (!rga_blit_jb(rga, jb, &jbs[render_jb_id], rotation))
-        continue;
-    }
     // !FLAGS_drm_raw8_mode &&
     if (!WaitPageFlip(1000)) {
       continue;
+    }
+    if (do_rga_blit) {
+      if (!rga_blit_jb(rga, jb, &jbs[render_jb_id], rotation))
+        continue;
     }
     if (do_rga_blit) {
       static auto do_nothing = [](JoinBO *jj UNUSED) {};
@@ -4509,7 +4509,7 @@ void DRMDisplayLeaf::SubRun() {
       printf("!!! drmModePageFlip fb id = %d\n", render_fb_id);
     //!! drmModeSetPlane work some problems with drmModePageFlip
     ret = drmModePageFlip(dev.fd, crtc_id, render_fb_id,
-                          DRM_MODE_PAGE_FLIP_EVENT, &waiting_for_flip);
+                          DRM_MODE_PAGE_FLIP_EVENT, this);
     if (ret == 0) {
       cur_jb_id = render_jb_id;
       waiting_for_flip = true;
