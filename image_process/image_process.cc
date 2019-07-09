@@ -4888,9 +4888,9 @@ bool NpuModelLeaf::Prepare(std::string model_name) {
   } else if (model_name == "object_detect") {
     models.push_back(ROCKX_MODULE_OBJECT_DETECTION);
   } else if (model_name == "face_attribute") {
-     models.push_back(ROCKX_MODULE_FACE_DETECTION);
-     models.push_back(ROCKX_MODULE_FACE_LANDMARK_5);
-     models.push_back(ROCKX_MODULE_FACE_ANALYZE);
+    models.push_back(ROCKX_MODULE_FACE_DETECTION);
+    models.push_back(ROCKX_MODULE_FACE_LANDMARK_5);
+    models.push_back(ROCKX_MODULE_FACE_ANALYZE);
   } else {
     av_log(NULL, AV_LOG_FATAL, "TODO: %s\n", model_name.c_str());
     return false;
@@ -5376,12 +5376,12 @@ struct face_attribute_factor {
   int age;
 };
 struct face_attribute_value {
-   int count;
-   struct face_attribute_factor get_face_attribute_factor[128];
+  int count;
+  struct face_attribute_factor get_face_attribute_factor[128];
 };
 
 static void *face_attribute_process(std::vector<rockx_handle_t> &npu_handles,
-                         rockx_image_t *input_image) {
+                                    rockx_image_t *input_image) {
 
   struct face_attribute_value *face_attribute_array =
       (face_attribute_value *)malloc(sizeof(face_attribute_value));
@@ -5410,23 +5410,31 @@ static void *face_attribute_process(std::vector<rockx_handle_t> &npu_handles,
   out_img.width = 112;
   out_img.height = 112;
   out_img.pixel_format = ROCKX_PIXEL_FORMAT_RGB888;
-  out_img.data = (uint8_t*)malloc(112*112*3*sizeof(char));
+  out_img.data = (uint8_t *)malloc(112 * 112 * 3 * sizeof(char));
 
   /*************** FACE Gender Age***************/
   rockx_face_attribute_t gender_age;
   memset(&gender_age, 0, sizeof(rockx_face_attribute_t));
   face_attribute_array->count = face_array.count;
   for (int i = 0; i < face_array.count; i++) {
-      rockx_face_align(face_5landmarks_handle, input_image, &face_array.object[i].box, nullptr, &out_img);
-      ret = rockx_face_attribute(face_attribute_handle, &out_img, &gender_age);
-      face_attribute_array->get_face_attribute_factor[i].left = face_array.object[i].box.left;
-      face_attribute_array->get_face_attribute_factor[i].top = face_array.object[i].box.top;
-      face_attribute_array->get_face_attribute_factor[i].right = face_array.object[i].box.right;
-      face_attribute_array->get_face_attribute_factor[i].bottom = face_array.object[i].box.bottom;
-      face_attribute_array->get_face_attribute_factor[i].score = face_array.object[i].score;
-      face_attribute_array->get_face_attribute_factor[i].gender = gender_age.gender;
-      face_attribute_array->get_face_attribute_factor[i].age = gender_age.age;
-      //printf("faceid: %d\tgender: %d\tage: %d\n", i, gender_age.gender, gender_age.age);
+    rockx_face_align(face_5landmarks_handle, input_image,
+                     &face_array.object[i].box, nullptr, &out_img);
+    ret = rockx_face_attribute(face_attribute_handle, &out_img, &gender_age);
+    face_attribute_array->get_face_attribute_factor[i].left =
+        face_array.object[i].box.left;
+    face_attribute_array->get_face_attribute_factor[i].top =
+        face_array.object[i].box.top;
+    face_attribute_array->get_face_attribute_factor[i].right =
+        face_array.object[i].box.right;
+    face_attribute_array->get_face_attribute_factor[i].bottom =
+        face_array.object[i].box.bottom;
+    face_attribute_array->get_face_attribute_factor[i].score =
+        face_array.object[i].score;
+    face_attribute_array->get_face_attribute_factor[i].gender =
+        gender_age.gender;
+    face_attribute_array->get_face_attribute_factor[i].age = gender_age.age;
+    // printf("faceid: %d\tgender: %d\tage: %d\n", i, gender_age.gender,
+    // gender_age.age);
   }
 
   free(out_img.data);
@@ -5434,7 +5442,7 @@ static void *face_attribute_process(std::vector<rockx_handle_t> &npu_handles,
 }
 
 static int face_attribute_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
-                    int disp_h, SDL_Renderer *render) {
+                               int disp_h, SDL_Renderer *render) {
   static int w = FLAGS_npu_piece_width;
   static int h = FLAGS_npu_piece_height;
   char gender_age[30];
@@ -5467,7 +5475,8 @@ static int face_attribute_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
       strncat(gender_age, age, 10);
 
       SDL_Rect rect = {left * disp_w / w, top * disp_h / h,
-                       (right - left) * disp_w / w, (bottom - top) * disp_h / h};
+                       (right - left) * disp_w / w,
+                       (bottom - top) * disp_h / h};
       SDL_RenderDrawRect(render, &rect);
       int fontw = 0, fonth = 0;
       SDL_Surface *name = sdl_font->GetFontPicture(
