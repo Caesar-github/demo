@@ -196,7 +196,10 @@ endif(WARNINGS_AS_ERRORS)
 
 option(MODULE_RK_IMAGE_PROCESS_DEMO "compile: image processing demo " OFF)
 if( MODULE_RK_IMAGE_PROCESS_DEMO )
-include_directories(image_process)
 add_subdirectory(image_process)
 endif()
 
+option(MODULE_RK_NPU_UVC_DEMO "compile: npu uvc demo " OFF)
+if(MODULE_RK_NPU_UVC_DEMO)
+add_subdirectory(npu_uvc_connection)
+endif()
