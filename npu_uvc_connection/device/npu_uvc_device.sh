@@ -27,5 +27,6 @@ else
 fi
 #input_format=image:yuv420p
 uvc_MJPEG.sh 1280 720
+# PC: adb push external/rknpu/rknn/rknn_api/examples/rknn_ssd_demo/model/ssd_inception_v2.rknn /userdata/
 rk_npu_uvc_device -i $input -f $input_format -w 1280 -h 720 \
-        -m /userdata/ssd_inception_v2.rknn -n ssd:300x300
+        -m /userdata/ssd_inception_v2.rknn -n rknn_ssd:300x300

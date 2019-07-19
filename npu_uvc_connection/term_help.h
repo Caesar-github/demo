@@ -19,5 +19,11 @@
  *
  */
 
-// this file run on 3399 to show npu result
-// data path: uvc camera -> mpp -> drm
+#ifndef NPU_UVC_TERM_HELP_
+#define NPU_UVC_TERM_HELP_
+
+void term_init();
+void term_deinit();
+int read_key();
+
+#endif

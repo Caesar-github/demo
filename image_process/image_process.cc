@@ -5386,7 +5386,7 @@ static void *face_attribute_process(std::vector<rockx_handle_t> &npu_handles,
   struct face_attribute_value *face_attribute_array =
       (face_attribute_value *)malloc(sizeof(face_attribute_value));
   assert(face_attribute_array);
-  memset(face_attribute_array, 0, sizeof(face_attribute_array));
+  memset(face_attribute_array, 0, sizeof(*face_attribute_array));
 
   rockx_handle_t face_det_handle = npu_handles[0];
   rockx_handle_t face_5landmarks_handle = npu_handles[1];

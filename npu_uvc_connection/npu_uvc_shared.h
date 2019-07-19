@@ -28,6 +28,8 @@
 extern "C" {
 #endif
 
+enum RK_NN_OUTPUT_TYPE { TYPE_RK_NPU_OUTPUT = 0, TYPE_RK_FACE_SDK_OUTPUT };
+
 struct aligned_npu_output {
   uint8_t want_float;
   uint8_t is_prealloc;
@@ -36,12 +38,22 @@ struct aligned_npu_output {
   uint8_t buf[0];
 } __attribute__((packed));
 
+// the width and height of npu processing image
+struct npu_widthheight {
+  uint32_t width;
+  uint32_t height;
+} __attribute__((packed));
+
+// post process at host side
 struct extra_jpeg_data {
   int64_t picture_timestamp;     // the time stamp of picture
-  uint32_t npu_outputs_num;      // the num of npu output
   int64_t npu_outputs_timestamp; // the time stamp of npu outputs
-  uint32_t npu_output_size;      // the size of all aligned_npu_output
-  uint8_t outputs[0];            // the buffer of npu outputs
+  uint32_t npu_output_type;      // RK_NN_OUTPUT_TYPE
+  int8_t model_identifier[64];
+  struct npu_widthheight npuwh;
+  uint32_t npu_output_size; // the length of follow outputs
+  uint32_t npu_outputs_num; // the num of npu output
+  uint8_t outputs[0];       // the buffer of npu outputs
 } __attribute__((packed));
 
 #ifdef __cplusplus

@@ -57,7 +57,8 @@ static bool do_uvc(easymedia::Flow *f,
                    easymedia::MediaBufferVector &input_vector);
 class UVCJoinFlow : public easymedia::Flow {
 public:
-  UVCJoinFlow(const char *param);
+  UVCJoinFlow(uint32_t npu_output_type, const std::string &model,
+              uint32_t npu_w, uint32_t npu_h);
   virtual ~UVCJoinFlow() {
     StopAllThread();
     uvc_video_id_exit_all();
@@ -65,11 +66,18 @@ public:
   bool Init();
 
 private:
+  uint32_t npu_output_type;
+  std::string model_identifier;
+  uint32_t npu_width;
+  uint32_t npu_height;
   friend bool do_uvc(easymedia::Flow *f,
                      easymedia::MediaBufferVector &input_vector);
 };
 
-UVCJoinFlow::UVCJoinFlow(const char *param _UNUSED) {
+UVCJoinFlow::UVCJoinFlow(uint32_t type, const std::string &model,
+                         uint32_t npu_w, uint32_t npu_h)
+    : npu_output_type(type), model_identifier(model), npu_width(npu_w),
+      npu_height(npu_h) {
   easymedia::SlotMap sm;
   sm.thread_model = easymedia::Model::ASYNCCOMMON;
   sm.mode_when_full = easymedia::InputMode::DROPFRONT;
@@ -80,8 +88,8 @@ UVCJoinFlow::UVCJoinFlow(const char *param _UNUSED) {
   sm.input_maxcachenum.push_back(1);
   sm.fetch_block.push_back(false);
   sm.process = do_uvc;
-  if (!InstallSlotMap(sm, "uvc", -1)) {
-    LOG("Fail to InstallSlotMap, %s\n", "uvc_join");
+  if (!InstallSlotMap(sm, "uvc_extract", -1)) {
+    fprintf(stderr, "Fail to InstallSlotMap, %s\n", "uvc_join");
     SetError(-EINVAL);
     return;
   }
@@ -119,54 +127,75 @@ static MppFrameFormat ConvertToMppPixFmt(const PixelFormat &fmt) {
   return (MppFrameFormat)-1;
 }
 
-bool do_uvc(easymedia::Flow *f _UNUSED,
-            easymedia::MediaBufferVector &input_vector) {
+bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
+  UVCJoinFlow *flow = (UVCJoinFlow *)f;
   auto img_buf = input_vector[0];
   auto &npu_output_buf = input_vector[1];
   if (!img_buf || img_buf->GetType() != Type::Image)
     return false;
   auto img = std::static_pointer_cast<easymedia::ImageBuffer>(img_buf);
   MppFrameFormat ifmt = ConvertToMppPixFmt(img->GetPixelFormat());
-  // printf("ifmt: %d, size: %d\n", ifmt, (int)img_buf->GetValidSize());
+  // fprintf(stderr, "ifmt: %d,size: %d\n", ifmt, (int)img_buf->GetValidSize());
   if (ifmt < 0)
     return false;
   mpi_enc_set_format(ifmt);
   struct extra_jpeg_data ejd;
   ejd.picture_timestamp = img_buf->GetTimeStamp();
+  ejd.npu_output_type = flow->npu_output_type;
+  snprintf((char *)ejd.model_identifier, sizeof(ejd.model_identifier),
+           flow->model_identifier.c_str());
   if (!npu_output_buf) {
-    ejd.npu_outputs_num = 0;
     ejd.npu_outputs_timestamp = 0;
     ejd.npu_output_size = 0;
+    ejd.npu_outputs_num = 0;
     uvc_read_camera_buffer(img_buf->GetPtr(), img_buf->GetValidSize(), &ejd,
                            sizeof(ejd));
   } else {
-    size_t num = npu_output_buf->GetValidSize();
-    rknn_output *outputs = (rknn_output *)npu_output_buf->GetPtr();
-    ejd.npu_outputs_num = num;
-    ejd.npu_outputs_timestamp = npu_output_buf->GetTimeStamp();
-    ejd.npu_output_size = num * sizeof(struct aligned_npu_output);
-    for (size_t i = 0; i < num; i++)
-      ejd.npu_output_size += outputs[i].size;
-    size_t size = sizeof(ejd) + ejd.npu_output_size;
-    struct extra_jpeg_data *new_ejd = (struct extra_jpeg_data *)malloc(size);
-    if (!new_ejd)
-      return false;
-    *new_ejd = ejd;
-    struct aligned_npu_output *an =
-        (struct aligned_npu_output *)new_ejd->outputs;
-    for (size_t i = 0; i < num; i++) {
-      an[i].want_float = outputs[i].want_float;
-      an[i].is_prealloc = outputs[i].is_prealloc;
-      an[i].index = outputs[i].index;
-      an[i].size = outputs[i].size;
-      memcpy(an[i].buf, outputs[i].buf, outputs[i].size);
+    size_t size = 0;
+    struct extra_jpeg_data *new_ejd = nullptr;
+    ejd.npuwh.width = flow->npu_width;
+    ejd.npuwh.height = flow->npu_height;
+    switch (ejd.npu_output_type) {
+    case TYPE_RK_NPU_OUTPUT: {
+      size_t num = npu_output_buf->GetValidSize();
+      ejd.npu_outputs_num = num;
+      rknn_output *outputs = (rknn_output *)npu_output_buf->GetPtr();
+      ejd.npu_outputs_timestamp = npu_output_buf->GetTimeStamp();
+      ejd.npu_output_size = num * sizeof(struct aligned_npu_output);
+      for (size_t i = 0; i < num; i++)
+        ejd.npu_output_size += outputs[i].size;
+      size = sizeof(ejd) + ejd.npu_output_size;
+      new_ejd = (struct extra_jpeg_data *)malloc(size);
+      if (!new_ejd)
+        return false;
+      *new_ejd = ejd;
+      uint32_t pos = 0;
+      for (size_t i = 0; i < num; i++) {
+        struct aligned_npu_output *an =
+            (struct aligned_npu_output *)(new_ejd->outputs + pos);
+        an[i].want_float = outputs[i].want_float;
+        an[i].is_prealloc = outputs[i].is_prealloc;
+        an[i].index = outputs[i].index;
+        an[i].size = outputs[i].size;
+        memcpy(an[i].buf, outputs[i].buf, outputs[i].size);
+        pos += (sizeof(*an) + outputs[i].size);
+      }
+    } break;
+    default:
+      fprintf(stderr, "unimplemented rk nn output type: %d\n",
+              ejd.npu_output_type);
+      break;
     }
-    uvc_read_camera_buffer(img_buf->GetPtr(), img_buf->GetValidSize(), new_ejd,
-                           size);
-    free(new_ejd);
+    if (new_ejd) {
+      uvc_read_camera_buffer(img_buf->GetPtr(), img_buf->GetValidSize(),
+                             new_ejd, size);
+      free(new_ejd);
+    }
   }
   return true;
 }
+
+#include "term_help.h"
 
 static char optstr[] = "?i:w:h:f:m:n:";
 
@@ -219,7 +248,7 @@ int main(int argc, char **argv) {
       printf("\t-n: model name, model request width/height; such as "
              "ssd:300x300\n");
       printf("\nusage example: \n");
-      printf("npu_uvc_device -i /dev/video6 -f image:jpeg -w 1280 -h 720 -m "
+      printf("rk_npu_uvc_device -i /dev/video5 -f image:jpeg -w 1280 -h 720 -m "
              "/userdata/ssd_inception_v2.rknn -n ssd\n");
       exit(0);
     }
@@ -309,7 +338,7 @@ int main(int argc, char **argv) {
     std::string str_tensor_type;
     std::string str_tensor_fmt;
     std::string str_want_float;
-    if (model_name == "ssd") {
+    if (model_name == "rknn_ssd") {
       str_tensor_type = NN_UINT8;
       str_tensor_fmt = KEY_NHWC;
       str_want_float = "1,1";
@@ -330,7 +359,8 @@ int main(int argc, char **argv) {
   } while (0);
 
   // uvc
-  auto uvc = std::make_shared<UVCJoinFlow>(nullptr);
+  auto uvc = std::make_shared<UVCJoinFlow>(TYPE_RK_NPU_OUTPUT, model_name,
+                                           npu_width, npu_height);
   if (!uvc || uvc->GetError() || !uvc->Init()) {
     fprintf(stderr, "Fail to create uvc\n");
     return -1;
@@ -371,8 +401,15 @@ int main(int argc, char **argv) {
     }
   } while (0);
 
-  while (getchar() != 'q')
+#ifndef NDEBUG
+  term_init();
+  while (read_key() != 'q')
     easymedia::msleep(10);
+  term_deinit();
+#else
+  while (true)
+    easymedia::msleep(10);
+#endif
 
 #if 1
   if (decoder) {
