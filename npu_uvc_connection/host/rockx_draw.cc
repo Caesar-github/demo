@@ -19,59 +19,59 @@
  *
  */
 
-#define IN_RKNN_SSD_CC
-
+#include "rockx_draw.h"
 #include <assert.h>
 
 #include "npu_pp_output.h"
 
-namespace NPU_UVC_SSD_DEMO {
+namespace NPU_UVC_ROCKX_DEMO {
 
-#include "../../../../../../../external/rknpu/rknn/rknn_api/examples/rknn_ssd_demo/src/ssd.cc"
-
-static SDLFont sdl_font(red, 16);
-bool SSDDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
-             NPUPostProcessOutput *output);
-bool SSDDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
-             NPUPostProcessOutput *output) {
-  int npu_w = output->npuwh.width;
-  int npu_h = output->npuwh.height;
-  auto group = (NPU_UVC_SSD_DEMO::detect_result_group_t *)(output->pp_output);
+static SDLFont fga_sdl_font(red, 40);
+bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
+                            NPUPostProcessOutput *output) {
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
   SDL_SetRenderDrawColor(renderer, 0xFF, 0x10, 0xEB, 0xFF);
-  for (int i = 0; i < group->count; i++) {
-    detect_result_t *det_result = &(group->results[i]);
-    printf("%s @ (%d %d %d %d) %f\n", det_result->name, det_result->box.left,
-           det_result->box.top, det_result->box.right, det_result->box.bottom,
-           det_result->prop);
-    int x1 = det_result->box.left;
-    int y1 = det_result->box.top;
-    int x2 = det_result->box.right;
-    int y2 = det_result->box.bottom;
+  int npu_w = output->npuwh.width;
+  int npu_h = output->npuwh.height;
+  char gender_age[32] = {0};
+  static const char *man = "Gender: Man, Age:";
+  static const char *women = "Gender: Women, Age:";
+  auto fga = (struct aligned_rockx_face_gender_age *)(output->pp_output);
+  for (uint32_t i = 0; i < output->count; i++) {
+    assert(sizeof(float) == 4);
+    float score;
+    memcpy(&score, fga->score, 4);
+    if (score < 0.85)
+      continue;
+    snprintf(gender_age, sizeof(gender_age), "%s %d", fga->gender ? man : women,
+             (int)fga->age);
+    int x1 = fga->left;
+    int y1 = fga->top;
+    int x2 = fga->right;
+    int y2 = fga->bottom;
     SDL_Rect rect = {x1 * render_rect.w / npu_w + render_rect.x,
                      y1 * render_rect.h / npu_h + render_rect.y,
                      (x2 - x1) * render_rect.w / npu_w,
                      (y2 - y1) * render_rect.h / npu_h};
     SDL_RenderDrawRect(renderer, &rect);
-    if (!det_result->name)
-      continue;
     int fontw = 0, fonth = 0;
-    SDL_Surface *name = sdl_font.GetFontPicture(
-        (char *)det_result->name, strlen(det_result->name), 32, &fontw, &fonth);
-    if (name) {
+    SDL_Surface *str = fga_sdl_font.GetFontPicture(
+        gender_age, strlen(gender_age), 32, &fontw, &fonth);
+    if (str) {
       SDL_Rect texture_dimension;
-      SDL_Texture *texture = load_texture(name, renderer, &texture_dimension);
-      SDL_FreeSurface(name);
+      SDL_Texture *texture = load_texture(str, renderer, &texture_dimension);
+      SDL_FreeSurface(str);
       SDL_Rect dst_dimension;
       dst_dimension.x = rect.x;
-      dst_dimension.y = rect.y - 18;
+      dst_dimension.y = rect.y - 36;
       dst_dimension.w = texture_dimension.w;
       dst_dimension.h = texture_dimension.h;
       SDL_RenderCopy(renderer, texture, &texture_dimension, &dst_dimension);
       SDL_DestroyTexture(texture);
     }
   }
+
   return true;
 }
 
-} // namespace NPU_UVC_SSD_DEMO
+} // namespace NPU_UVC_ROCKX_DEMO

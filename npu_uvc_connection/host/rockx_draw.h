@@ -19,25 +19,17 @@
  *
  */
 
-#ifndef NPU_UVC_RKNN_SSD_
-#define NPU_UVC_RKNN_SSD_
-
-#ifndef IN_RKNN_SSD_CC
-namespace NPU_UVC_SSD_DEMO {
-#endif
-
-#include "../../../../../../../external/rknpu/rknn/rknn_api/examples/rknn_ssd_demo/src/ssd.h"
-
-#ifndef IN_RKNN_SSD_CC
-}
-#endif
+#ifndef NPU_UVC_ROCKX_DRAW_
+#define NPU_UVC_ROCKX_DRAW_
 
 #include <SDL2/SDL.h>
 
 class NPUPostProcessOutput;
-namespace NPU_UVC_SSD_DEMO {
-bool SSDDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
-             NPUPostProcessOutput *output);
+namespace NPU_UVC_ROCKX_DEMO {
+
+bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
+                            NPUPostProcessOutput *output);
+
 }
 
-#endif // #ifndef NPU_UVC_RKNN_SSD_
+#endif // #ifndef NPU_UVC_ROCKX_DRAW_

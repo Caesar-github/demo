@@ -28,14 +28,33 @@
 extern "C" {
 #endif
 
-enum RK_NN_OUTPUT_TYPE { TYPE_RK_NPU_OUTPUT = 0, TYPE_RK_FACE_SDK_OUTPUT };
+enum RK_NN_OUTPUT_TYPE {
+  TYPE_INVALID_NPU_OUTPUT = -1,
+  TYPE_RK_NPU_OUTPUT = 0,
+  TYPE_RK_ROCKX_OUTPUT,
+  TYPE_RK_FACE_SDK_OUTPUT
+};
 
+// all types of output shoule be redefined with attribute packed
+
+// rk npu output
 struct aligned_npu_output {
   uint8_t want_float;
   uint8_t is_prealloc;
   uint32_t index;
   uint32_t size;
   uint8_t buf[0];
+} __attribute__((packed));
+
+// rockx output
+struct aligned_rockx_face_gender_age {
+  int32_t left;
+  int32_t top;
+  int32_t right;
+  int32_t bottom;
+  uint8_t score[4]; // assert(sizeof(float) == 4);
+  int32_t gender;
+  int32_t age;
 } __attribute__((packed));
 
 // the width and height of npu processing image

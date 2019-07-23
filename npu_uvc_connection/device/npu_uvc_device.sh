@@ -13,12 +13,14 @@ done
 # uvc first, then rkisp
 echo uvcvideo=$uvcvideo,rkisp_main=$rkisp_main,cifvideo=$cifvideo
 
-if test $rkisp_main; then
-    input=$rkisp_main
-    input_format=image:nv12
-elif test $uvcvideo; then
+need_3a=0
+if test $uvcvideo; then
     input=$uvcvideo
     input_format=image:jpeg
+elif test $rkisp_main; then
+    input=$rkisp_main
+    input_format=image:nv12
+    need_3a=1
 elif test $cifvideo; then
     input=$cifvideo
     input_format=image:nv16
@@ -28,5 +30,13 @@ fi
 #input_format=image:yuv420p
 uvc_MJPEG.sh 1280 720
 # PC: adb push external/rknpu/rknn/rknn_api/examples/rknn_ssd_demo/model/ssd_inception_v2.rknn /userdata/
-rk_npu_uvc_device -i $input -f $input_format -w 1280 -h 720 \
-        -m /userdata/ssd_inception_v2.rknn -n rknn_ssd:300x300
+model_file=/userdata/ssd_inception_v2.rknn
+if [ ! -f $model_file ]; then
+    echo "miss $model_file"
+    exit -1
+fi
+# rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 \
+#         -m /userdata/ssd_inception_v2.rknn -n rknn_ssd:300x300
+
+rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 \
+        -n rockx_face_gender_age:300x300

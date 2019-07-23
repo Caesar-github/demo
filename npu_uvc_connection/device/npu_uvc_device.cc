@@ -51,6 +51,10 @@ extern "C" {
 #include <uvc/uvc_control.h>
 #include <uvc/uvc_video.h>
 }
+
+#include <camera_engine_rkisp/interface/mediactl.h>
+#include <camera_engine_rkisp/interface/rkisp_control_loop.h>
+
 #include "npu_uvc_shared.h"
 #include <rknn_runtime.h>
 static bool do_uvc(easymedia::Flow *f,
@@ -173,13 +177,26 @@ bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
       for (size_t i = 0; i < num; i++) {
         struct aligned_npu_output *an =
             (struct aligned_npu_output *)(new_ejd->outputs + pos);
-        an[i].want_float = outputs[i].want_float;
-        an[i].is_prealloc = outputs[i].is_prealloc;
-        an[i].index = outputs[i].index;
-        an[i].size = outputs[i].size;
-        memcpy(an[i].buf, outputs[i].buf, outputs[i].size);
+        an->want_float = outputs[i].want_float;
+        an->is_prealloc = outputs[i].is_prealloc;
+        an->index = outputs[i].index;
+        an->size = outputs[i].size;
+        memcpy(an->buf, outputs[i].buf, outputs[i].size);
         pos += (sizeof(*an) + outputs[i].size);
       }
+    } break;
+    case TYPE_RK_ROCKX_OUTPUT: {
+      size_t num = npu_output_buf->GetValidSize();
+      ejd.npu_outputs_num = num;
+      // rknn_output *outputs = (rknn_output *)npu_output_buf->GetPtr();
+      ejd.npu_outputs_timestamp = npu_output_buf->GetTimeStamp();
+      ejd.npu_output_size = npu_output_buf->GetSize();
+      size = sizeof(ejd) + ejd.npu_output_size;
+      new_ejd = (struct extra_jpeg_data *)malloc(size);
+      if (!new_ejd)
+        return false;
+      *new_ejd = ejd;
+      memcpy(new_ejd->outputs, npu_output_buf->GetPtr(), ejd.npu_output_size);
     } break;
     default:
       fprintf(stderr, "unimplemented rk nn output type: %d\n",
@@ -187,6 +204,7 @@ bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
       break;
     }
     if (new_ejd) {
+      fprintf(stderr, "set extra uvc data: %p, size: %d\n", new_ejd, (int)size);
       uvc_read_camera_buffer(img_buf->GetPtr(), img_buf->GetValidSize(),
                              new_ejd, size);
       free(new_ejd);
@@ -195,9 +213,263 @@ bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
   return true;
 }
 
+#if HAVE_ROCKX
+#include <rockx.h>
+static bool do_rockx(easymedia::Flow *f,
+                     easymedia::MediaBufferVector &input_vector);
+class RockxFlow : public easymedia::Flow {
+public:
+  RockxFlow(const std::string &model);
+  virtual ~RockxFlow() {
+    StopAllThread();
+    for (auto handle : rockx_handles)
+      rockx_destroy(handle);
+  }
+
+private:
+  std::string model_identifier;
+  std::vector<rockx_handle_t> rockx_handles;
+  std::shared_ptr<easymedia::MediaBuffer> tmp_img;
+  friend bool do_rockx(easymedia::Flow *f,
+                       easymedia::MediaBufferVector &input_vector);
+};
+
+RockxFlow::RockxFlow(const std::string &model_str)
+    : model_identifier(model_str) {
+  easymedia::SlotMap sm;
+  sm.thread_model = easymedia::Model::ASYNCCOMMON;
+  sm.mode_when_full = easymedia::InputMode::DROPFRONT;
+  sm.input_slots.push_back(0);
+  sm.input_maxcachenum.push_back(2);
+  sm.fetch_block.push_back(true);
+  sm.output_slots.push_back(0);
+  sm.process = do_rockx;
+  if (!InstallSlotMap(sm, "rockx", -1)) {
+    fprintf(stderr, "Fail to InstallSlotMap, %s\n", "rockx");
+    SetError(-EINVAL);
+    return;
+  }
+  std::vector<rockx_module_t> models;
+  void *config = nullptr;
+  size_t config_size = 0;
+  if (model_str == "rockx_face_gender_age") {
+    models.push_back(ROCKX_MODULE_FACE_DETECTION);
+    models.push_back(ROCKX_MODULE_FACE_LANDMARK_5);
+    models.push_back(ROCKX_MODULE_FACE_ANALYZE);
+  } else {
+    assert(0);
+  }
+  for (size_t i = 0; i < models.size(); i++) {
+    rockx_handle_t npu_handle = nullptr;
+    rockx_module_t &model = models[i];
+    rockx_ret_t ret = rockx_create(&npu_handle, model, config, config_size);
+    if (ret != ROCKX_RET_SUCCESS) {
+      fprintf(stderr, "init rockx module %d error=%d\n", model, ret);
+      SetError(-EINVAL);
+      return;
+    }
+    rockx_handles.push_back(npu_handle);
+  }
+}
+
+bool do_rockx(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
+  assert(sizeof(float) == 4);
+  RockxFlow *flow = (RockxFlow *)f;
+  auto input =
+      std::static_pointer_cast<easymedia::ImageBuffer>(input_vector[0]);
+  if (!input)
+    return false;
+  rockx_image_t input_image;
+  input_image.width = input->GetWidth();
+  input_image.height = input->GetHeight();
+  input_image.data = (uint8_t *)input->GetPtr();
+  input_image.pixel_format = ROCKX_PIXEL_FORMAT_BGR888;
+  auto &name = flow->model_identifier;
+  auto &handles = flow->rockx_handles;
+  if (name == "rockx_face_gender_age") {
+    auto &tmp_img = flow->tmp_img;
+    if (!tmp_img) {
+      tmp_img = easymedia::MediaBuffer::Alloc(112 * 112 * 3);
+      if (!tmp_img) {
+        fprintf(stderr, "no memory\n");
+        return false;
+      }
+    }
+    rockx_handle_t &face_det_handle = handles[0];
+    rockx_handle_t &face_5landmarks_handle = handles[1];
+    rockx_handle_t &face_attribute_handle = handles[2];
+    rockx_object_array_t face_array;
+    memset(&face_array, 0, sizeof(rockx_object_array_t));
+    rockx_ret_t ret =
+        rockx_face_detect(face_det_handle, &input_image, &face_array, nullptr);
+    if (ret != ROCKX_RET_SUCCESS) {
+      fprintf(stderr, "rockx_face_detect error %d\n", ret);
+      return false;
+    }
+    if (face_array.count <= 0)
+      return false;
+    rockx_image_t out_img;
+    out_img.width = 112;
+    out_img.height = 112;
+    out_img.pixel_format = ROCKX_PIXEL_FORMAT_RGB888;
+    out_img.data = (uint8_t *)tmp_img->GetPtr();
+    size_t ret_buf_size =
+        face_array.count * sizeof(struct aligned_rockx_face_gender_age);
+    rockx_face_attribute_t gender_age;
+    memset(&gender_age, 0, sizeof(gender_age));
+    auto ret_buf = easymedia::MediaBuffer::Alloc(ret_buf_size);
+    if (!ret_buf)
+      return false;
+    auto face_attribute_array =
+        (struct aligned_rockx_face_gender_age *)ret_buf->GetPtr();
+    memset(face_attribute_array, 0, ret_buf_size);
+    size_t count = 0;
+    for (int i = 0; i < face_array.count; i++) {
+      ret = rockx_face_align(face_5landmarks_handle, &input_image,
+                             &face_array.object[i].box, nullptr, &out_img);
+      if (ret != ROCKX_RET_SUCCESS) {
+        fprintf(stderr, "rockx_face_align error %d\n", ret);
+        continue;
+      }
+      ret = rockx_face_attribute(face_attribute_handle, &out_img, &gender_age);
+      if (ret != ROCKX_RET_SUCCESS) {
+        fprintf(stderr, "rockx_face_attribute error %d\n", ret);
+        continue;
+      }
+      auto array = &face_attribute_array[count];
+      array->left = face_array.object[i].box.left;
+      array->top = face_array.object[i].box.top;
+      array->right = face_array.object[i].box.right;
+      array->bottom = face_array.object[i].box.bottom;
+      memcpy(array->score, &face_array.object[i].score, 4);
+      array->gender = gender_age.gender;
+      array->age = gender_age.age;
+      count++;
+      // printf("faceid: %d\tgender: %d\tage: %d\n", i, gender_age.gender,
+      // gender_age.age);
+    }
+    if (count == 0)
+      return false;
+    ret_buf->SetSize(count * sizeof(struct aligned_rockx_face_gender_age));
+    ret_buf->SetValidSize(count);
+    flow->SetOutput(ret_buf, 0);
+  } else {
+    assert(0);
+  }
+  return true;
+}
+
+#endif // #if HAVE_ROCKX
+
+struct RKisp_media_ctl {
+  /* media controller */
+  struct media_device *controller;
+  struct media_entity *isp_subdev;
+  struct media_entity *isp_params_dev;
+  struct media_entity *isp_stats_dev;
+  struct media_entity *sensor_subdev;
+};
+
+// rkisp* implement from external/camera_engine_rkisp
+#define MAX_MEDIA_INDEX 64
+static struct media_device *__rkisp_get_media_dev_by_vnode(const char *vnode) {
+  char sys_path[64];
+  struct media_device *device = nullptr;
+  uint32_t nents, j, i = 0;
+  FILE *fp;
+
+  while (i < MAX_MEDIA_INDEX) {
+    snprintf(sys_path, 64, "/dev/media%d", i++);
+    fp = fopen(sys_path, "r");
+    if (!fp)
+      continue;
+    fclose(fp);
+
+    device = media_device_new(sys_path);
+    /* Enumerate entities, pads and links. */
+    media_device_enumerate(device);
+    nents = media_get_entities_count(device);
+    for (j = 0; j < nents; ++j) {
+      struct media_entity *entity = media_get_entity(device, j);
+      const char *devname = media_entity_get_devname(entity);
+      if (NULL != devname) {
+        if (!strcmp(devname, vnode))
+          goto out;
+      }
+    }
+    media_device_unref(device);
+    device = nullptr;
+  }
+
+out:
+  return device;
+}
+
+static void camera_engine_rkisp_stop(void *rkisp_engine) {
+  if (!rkisp_engine)
+    return;
+  rkisp_cl_stop(rkisp_engine);
+  rkisp_cl_deinit(rkisp_engine);
+}
+
+static void *camera_engine_rkisp_start(const std::string &device_name) {
+  /* start isp */
+  static const char *iq_file = "/etc/cam_iq.xml";
+  struct RKisp_media_ctl rkisp;
+  memset(&rkisp, 0, sizeof(rkisp));
+  void *rkisp_engine = nullptr;
+  rkisp_cl_init(&rkisp_engine, iq_file, nullptr);
+
+  if (!rkisp_engine) {
+    fprintf(stderr, "rkisp_cl_init engine failed\n");
+    return nullptr;
+  }
+
+  struct rkisp_cl_prepare_params_s params;
+  memset(&params, 0, sizeof(params));
+  int nents;
+
+  rkisp.controller = __rkisp_get_media_dev_by_vnode(device_name.c_str());
+  if (!rkisp.controller) {
+    fprintf(stderr, "Can't find controller, maybe use a wrong video-node or "
+                    "wrong permission to media node");
+    return nullptr;
+  }
+  rkisp.isp_subdev = media_get_entity_by_name(
+      rkisp.controller, "rkisp1-isp-subdev", strlen("rkisp1-isp-subdev"));
+  rkisp.isp_params_dev = media_get_entity_by_name(
+      rkisp.controller, "rkisp1-input-params", strlen("rkisp1-input-params"));
+  rkisp.isp_stats_dev = media_get_entity_by_name(
+      rkisp.controller, "rkisp1-statistics", strlen("rkisp1-statistics"));
+  /* assume the last enity is sensor_subdev */
+  nents = media_get_entities_count(rkisp.controller);
+  rkisp.sensor_subdev = media_get_entity(rkisp.controller, nents - 1);
+
+  params.isp_sd_node_path = media_entity_get_devname(rkisp.isp_subdev);
+  params.isp_vd_params_path = media_entity_get_devname(rkisp.isp_params_dev);
+  params.isp_vd_stats_path = media_entity_get_devname(rkisp.isp_stats_dev);
+  params.sensor_sd_node_path = media_entity_get_devname(rkisp.sensor_subdev);
+  rkisp_cl_prepare(rkisp_engine, &params);
+
+  media_device_unref(rkisp.controller);
+
+  auto ret = rkisp_cl_start(rkisp_engine);
+  if (ret) {
+    camera_engine_rkisp_stop(rkisp_engine);
+    rkisp_engine = nullptr;
+  }
+
+  if (!rkisp_engine) {
+    fprintf(stderr, "rkisp_init engine failed\n");
+    return nullptr;
+  }
+  fprintf(stderr, "rkisp_init engine succeed\n");
+  return rkisp_engine;
+}
+
 #include "term_help.h"
 
-static char optstr[] = "?i:w:h:f:m:n:";
+static char optstr[] = "?i:c:w:h:f:m:n:";
 
 int main(int argc, char **argv) {
   int c;
@@ -207,6 +479,7 @@ int main(int argc, char **argv) {
   int npu_width = 300, npu_height = 300;
   std::string model_path;
   std::string model_name;
+  bool need_3a = false;
 
   opterr = 1;
   while ((c = getopt(argc, argv, optstr)) != -1) {
@@ -214,6 +487,9 @@ int main(int argc, char **argv) {
     case 'i':
       v4l2_video_path = optarg;
       printf("input path: %s\n", v4l2_video_path.c_str());
+      break;
+    case 'c':
+      need_3a = !!atoi(optarg);
       break;
     case 'f':
       format = optarg;
@@ -254,8 +530,12 @@ int main(int argc, char **argv) {
     }
   }
   assert(!v4l2_video_path.empty());
-  assert(!model_path.empty());
-
+  void *rkisp_engine = nullptr;
+  if (need_3a) {
+    rkisp_engine = camera_engine_rkisp_start(v4l2_video_path);
+    if (!rkisp_engine)
+      exit(EXIT_FAILURE);
+  }
   // mpp
   std::shared_ptr<easymedia::Flow> decoder;
   // many usb camera decode out fmt do not match to rkmpp,
@@ -325,41 +605,63 @@ int main(int argc, char **argv) {
   } while (0);
 
   // rknn
+  enum RK_NN_OUTPUT_TYPE type_of_npu_output = TYPE_INVALID_NPU_OUTPUT;
   std::shared_ptr<easymedia::Flow> rknn;
-  do {
-    std::string flow_name("filter");
-    std::string filter_name("rknn");
-    std::string flow_param;
-    PARAM_STRING_APPEND(flow_param, KEY_NAME, filter_name);
-    PARAM_STRING_APPEND(flow_param, KEK_THREAD_SYNC_MODEL, KEY_ASYNCCOMMON);
-    PARAM_STRING_APPEND(flow_param, KEY_INPUTDATATYPE, IMAGE_RGB888);
-    std::string rknn_param;
-    PARAM_STRING_APPEND(rknn_param, KEY_PATH, model_path);
-    std::string str_tensor_type;
-    std::string str_tensor_fmt;
-    std::string str_want_float;
-    if (model_name == "rknn_ssd") {
-      str_tensor_type = NN_UINT8;
-      str_tensor_fmt = KEY_NHWC;
-      str_want_float = "1,1";
-    } else {
+  if (!strncmp(model_name.c_str(), "rockx_", 6)) {
+#if HAVE_ROCKX
+    type_of_npu_output = TYPE_RK_ROCKX_OUTPUT;
+    if (model_name != "rockx_face_gender_age" && true) {
       fprintf(stderr, "TODO for %s\n", model_name.c_str());
       assert(0);
       return -1;
     }
-    PARAM_STRING_APPEND(rknn_param, KEY_TENSOR_TYPE, str_tensor_type);
-    PARAM_STRING_APPEND(rknn_param, KEY_TENSOR_FMT, str_tensor_fmt);
-    PARAM_STRING_APPEND(rknn_param, KEY_OUTPUT_WANT_FLOAT, str_want_float);
-    rknn = create_flow(flow_name, flow_param, rknn_param);
-    if (!rknn) {
-      assert(0);
+    rknn = std::make_shared<RockxFlow>(model_name);
+    if (!rknn || rknn->GetError()) {
+      fprintf(stderr, "Fail to create rockx flow\n");
       return -1;
     }
-    rga->AddDownFlow(rknn, 0, 0);
-  } while (0);
+#else
+    fprintf(stderr, "rockx is not enable\n");
+    return -1;
+#endif
+  } else if (!strncmp(model_name.c_str(), "rknn_", 5)) {
+    assert(!model_path.empty());
+    type_of_npu_output = TYPE_RK_NPU_OUTPUT;
+    do {
+      std::string flow_name("filter");
+      std::string filter_name("rknn");
+      std::string flow_param;
+      PARAM_STRING_APPEND(flow_param, KEY_NAME, filter_name);
+      PARAM_STRING_APPEND(flow_param, KEK_THREAD_SYNC_MODEL, KEY_ASYNCCOMMON);
+      PARAM_STRING_APPEND(flow_param, KEY_INPUTDATATYPE, IMAGE_RGB888);
+      std::string rknn_param;
+      PARAM_STRING_APPEND(rknn_param, KEY_PATH, model_path);
+      std::string str_tensor_type;
+      std::string str_tensor_fmt;
+      std::string str_want_float;
+      if (model_name == "rknn_ssd") {
+        str_tensor_type = NN_UINT8;
+        str_tensor_fmt = KEY_NHWC;
+        str_want_float = "1,1";
+      } else {
+        fprintf(stderr, "TODO for %s\n", model_name.c_str());
+        assert(0);
+        return -1;
+      }
+      PARAM_STRING_APPEND(rknn_param, KEY_TENSOR_TYPE, str_tensor_type);
+      PARAM_STRING_APPEND(rknn_param, KEY_TENSOR_FMT, str_tensor_fmt);
+      PARAM_STRING_APPEND(rknn_param, KEY_OUTPUT_WANT_FLOAT, str_want_float);
+      rknn = create_flow(flow_name, flow_param, rknn_param);
+      if (!rknn) {
+        assert(0);
+        return -1;
+      }
+    } while (0);
+  }
+  rga->AddDownFlow(rknn, 0, 0);
 
   // uvc
-  auto uvc = std::make_shared<UVCJoinFlow>(TYPE_RK_NPU_OUTPUT, model_name,
+  auto uvc = std::make_shared<UVCJoinFlow>(type_of_npu_output, model_name,
                                            npu_width, npu_height);
   if (!uvc || uvc->GetError() || !uvc->Init()) {
     fprintf(stderr, "Fail to create uvc\n");
@@ -431,6 +733,7 @@ int main(int argc, char **argv) {
   uvc.reset();
   rknn.reset();
 #endif
+  camera_engine_rkisp_stop(rkisp_engine);
 
   return 0;
 }

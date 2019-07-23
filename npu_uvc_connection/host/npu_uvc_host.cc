@@ -47,7 +47,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 
-#include "rknn_ssd.h"
+#include "npu_pp_output.h"
 
 static std::shared_ptr<easymedia::Flow>
 create_flow(const std::string &flow_name, const std::string &flow_param,
@@ -58,65 +58,6 @@ create_flow(const std::string &flow_name, const std::string &flow_param,
   if (!ret)
     fprintf(stderr, "Create flow %s failed\n", flow_name.c_str());
   return ret;
-}
-
-#include "npu_uvc_shared.h"
-#include <rknn_runtime.h>
-
-typedef bool (*PostDrawFunc)(SDL_Renderer *renderer,
-                             const SDL_Rect &render_rect, void *pp_output,
-                             int npu_w, int npu_h);
-
-class NPUPostProcessOutput {
-public:
-  NPUPostProcessOutput(struct extra_jpeg_data *input);
-  ~NPUPostProcessOutput() {
-    if (pp_output)
-      free(pp_output);
-  }
-
-  void *pp_output;
-  PostDrawFunc pp_func;
-  struct npu_widthheight npuwh;
-};
-
-NPUPostProcessOutput::NPUPostProcessOutput(struct extra_jpeg_data *ejd)
-    : pp_output(nullptr), pp_func(nullptr), npuwh({0, 0}) {
-  switch (ejd->npu_output_type) {
-  case TYPE_RK_NPU_OUTPUT: {
-    struct aligned_npu_output ano[ejd->npu_outputs_num];
-    if (!strcmp((const char *)ejd->model_identifier, "rknn_ssd")) {
-      pp_output = malloc(sizeof(NPU_UVC_SSD_DEMO::detect_result_group_t));
-      if (!pp_output) {
-        assert(0);
-        goto fail;
-      }
-      auto group = (NPU_UVC_SSD_DEMO::detect_result_group_t *)pp_output;
-      int ret = NPU_UVC_SSD_DEMO::postProcessSSD(
-          (float *)(ano[1].buf), (float *)(ano[0].buf), ejd->npuwh.width,
-          ejd->npuwh.height, group);
-      if (ret) {
-        fprintf(stderr, "Fail to postProcessSSD\n");
-        goto fail;
-      }
-      npuwh = ejd->npuwh;
-      pp_func = NPU_UVC_SSD_DEMO::SSDDraw;
-    } else {
-      fprintf(stderr, "TODO %s: %d\n", __FUNCTION__, __LINE__);
-      goto fail;
-    }
-  } break;
-  default:
-    fprintf(stderr, "unimplemented rk nn output type: %d\n",
-            ejd->npu_output_type);
-    break;
-  }
-  return;
-fail:
-  if (pp_output) {
-    free(pp_output);
-    pp_output = nullptr;
-  }
 }
 
 static bool do_extract(easymedia::Flow *f,
@@ -163,6 +104,8 @@ UVCExtractFlow::UVCExtractFlow() {
   }
 }
 
+#define JPEG_SECTION_MAX_LEN ((uint16_t)-1)
+
 bool do_extract(easymedia::Flow *f,
                 easymedia::MediaBufferVector &input_vector) {
   UVCExtractFlow *flow = (UVCExtractFlow *)f;
@@ -198,7 +141,7 @@ bool do_extract(easymedia::Flow *f,
         return false;
       }
     }
-    if (marker == 0xD9)
+    if (marker == 0xD9 || marker == 0xDA)
       break;
     if (pos > buffer_size - 2)
       break;
@@ -206,7 +149,7 @@ bool do_extract(easymedia::Flow *f,
     ll = (uint16_t)buffer[pos++];
     itemlen = (lh << 8) | ll;
     if (itemlen < 2) {
-      fprintf(stderr, "invalid marker\n");
+      fprintf(stderr, "invalid marker!\n");
       return false;
     }
     if (pos + itemlen - 2 > buffer_size) {
@@ -214,19 +157,30 @@ bool do_extract(easymedia::Flow *f,
       return false;
     }
     if (marker == 0xe2) {
-      if (pos + sizeof(struct extra_jpeg_data) > buffer_size) {
-        fprintf(stderr, "Invalid NPU Output data\n");
+      void *tmp = realloc(ejd, size + itemlen - 2);
+      if (!tmp) {
+        free(ejd);
+        fprintf(stderr, "Not enough memory for size=%d\n",
+                (int)(size + itemlen - 2));
         return false;
       }
-      size = itemlen - 2;
-      ejd = (struct extra_jpeg_data *)(buffer + pos);
-      break;
+      memcpy(((uint8_t *)tmp) + size, buffer + pos, itemlen - 2);
+      ejd = (struct extra_jpeg_data *)tmp;
+      size += (itemlen - 2);
     }
     pos += itemlen - 2;
   }
+  if (!ejd) {
+    fprintf(stderr, "no ffe2, input is not from npu!\n");
+    return false;
+  }
   std::shared_ptr<easymedia::MediaBuffer> npu_output;
   if (ejd->npu_output_size > 0) {
-    assert(size == (sizeof(struct extra_jpeg_data) + ejd->npu_output_size));
+    fprintf(stderr, "ejd->npu_output_size: %d\n", (int)ejd->npu_output_size);
+    if (size != (sizeof(struct extra_jpeg_data) + ejd->npu_output_size)) {
+      fprintf(stderr, "broken remote npu data!\n");
+      return false;
+    }
     auto npp = std::make_shared<NPUPostProcessOutput>(ejd);
     if (npp && npp->pp_output) {
       npu_output = std::make_shared<easymedia::MediaBuffer>();
@@ -243,7 +197,9 @@ bool do_extract(easymedia::Flow *f,
   auto img_output = std::make_shared<easymedia::ImageBuffer>();
   if (decoder->Process(input, img_output))
     img_output = nullptr;
-  bool ret = (npu_output || img_output);
+  bool ret = true;
+  if (!npu_output && !img_output)
+    ret = false;
   if (img_output) {
     assert(ejd);
     img_output->SetTimeStamp(ejd->picture_timestamp);
@@ -258,7 +214,7 @@ static bool do_compose_draw(easymedia::Flow *f,
                             easymedia::MediaBufferVector &input_vector);
 class SDLComposeFlow : public easymedia::Flow {
 public:
-  SDLComposeFlow();
+  SDLComposeFlow(int rotate_degree);
   virtual ~SDLComposeFlow() {
     StopAllThread();
     if (texture)
@@ -268,24 +224,27 @@ public:
     if (window)
       SDL_DestroyWindow(window);
     SDL_Quit();
+    fprintf(stderr, "sdl quit\n");
   }
 
 private:
+  int rotate;
   SDL_Window *window;
   SDL_Renderer *renderer;
   SDL_Texture *texture;
   SDL_RendererInfo renderer_info;
   SDL_Rect rect;
   bool prepared;
+  std::shared_ptr<easymedia::MediaBuffer> last_npu_output;
 
   bool SDLPrepare();
   friend bool do_compose_draw(easymedia::Flow *f,
                               easymedia::MediaBufferVector &input_vector);
 };
 
-SDLComposeFlow::SDLComposeFlow()
-    : window(nullptr), renderer(nullptr), texture(nullptr), rect({0, 0, 0, 0}),
-      prepared(false) {
+SDLComposeFlow::SDLComposeFlow(int rotate_degree)
+    : rotate(rotate_degree), window(nullptr), renderer(nullptr),
+      texture(nullptr), rect({0, 0, 0, 0}), prepared(false) {
   easymedia::SlotMap sm;
   sm.thread_model = easymedia::Model::ASYNCCOMMON;
   sm.mode_when_full = easymedia::InputMode::DROPFRONT;
@@ -306,7 +265,7 @@ SDLComposeFlow::SDLComposeFlow()
 bool SDLComposeFlow::SDLPrepare() {
   SDL_LogSetPriority(SDL_LOG_CATEGORY_VIDEO, SDL_LOG_PRIORITY_VERBOSE);
   SDL_LogSetPriority(SDL_LOG_CATEGORY_RENDER, SDL_LOG_PRIORITY_VERBOSE);
-  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER)) {
+  if (SDL_Init(SDL_INIT_VIDEO)) { // SDL_INIT_TIMER
     fprintf(stderr, "Could not initialize SDL - %s\n", SDL_GetError());
     fprintf(stderr, "(Did you set the DISPLAY variable?)\n");
     return false;
@@ -427,33 +386,38 @@ bool do_compose_draw(easymedia::Flow *f,
   if (!ret) {
     SDL_Rect src_rect = {0, 0, img->GetWidth(), img->GetHeight()};
     dst_rect = flow->rect;
-    if (src_rect.w <= dst_rect.w && src_rect.h <= dst_rect.h) {
-      dst_rect.x = (dst_rect.w - src_rect.w) / 2;
-      dst_rect.y = (dst_rect.h - src_rect.h) / 2;
-      dst_rect.w = src_rect.w;
-      dst_rect.h = src_rect.h;
+    if (src_rect.w * dst_rect.h > src_rect.h * dst_rect.w) {
+      auto h = (dst_rect.w * src_rect.h) / src_rect.w;
+      h &= ~1;
+      dst_rect.y = (dst_rect.h - h) / 2;
+      dst_rect.h = h;
     } else {
-      if (src_rect.w * dst_rect.h > src_rect.h * dst_rect.w) {
-        auto h = (dst_rect.w * src_rect.h) / src_rect.w;
-        h &= ~1;
-        dst_rect.y = (dst_rect.h - h) / 2;
-        dst_rect.h = h;
-      } else {
-        auto w = (dst_rect.h * src_rect.w) / src_rect.h;
-        w &= ~1;
-        dst_rect.x = (dst_rect.w - w) / 2;
-        dst_rect.w = w;
-      }
+      auto w = (dst_rect.h * src_rect.w) / src_rect.h;
+      w &= ~1;
+      dst_rect.x = (dst_rect.w - w) / 2;
+      dst_rect.w = w;
     }
-    SDL_RenderCopyEx(flow->renderer, texture, &src_rect, &dst_rect, 0, NULL,
-                     SDL_FLIP_NONE);
+    // fprintf(stderr, "src: %d,%d-%d,%d, dst: %d,%d-%d,%d\n", src_rect.x,
+    //         src_rect.y, src_rect.w, src_rect.h, dst_rect.x, dst_rect.y,
+    //         dst_rect.w, dst_rect.h);
+    SDL_RenderCopyEx(flow->renderer, texture, &src_rect, &dst_rect,
+                     flow->rotate, NULL, SDL_FLIP_NONE);
   }
   // 2. draw npu output
-  auto &npu_out_put = input_vector[1];
+  auto npu_out_put = input_vector[1];
+  if (npu_out_put) {
+    flow->last_npu_output = npu_out_put;
+  } else {
+    if (flow->last_npu_output) {
+      auto diff =
+          img_buf->GetTimeStamp() - flow->last_npu_output->GetTimeStamp();
+      if (diff >= 0 && diff < 500)
+        npu_out_put = flow->last_npu_output;
+    }
+  }
   if (npu_out_put && dst_rect.w > 0 && dst_rect.h > 0) {
     auto npo = (NPUPostProcessOutput *)npu_out_put->GetPtr();
-    (npo->pp_func)(flow->renderer, dst_rect, npo->pp_output, npo->npuwh.width,
-                   npo->npuwh.height);
+    (npo->pp_func)(flow->renderer, dst_rect, npo);
   }
   SDL_RenderPresent(flow->renderer);
   return false;
@@ -461,12 +425,13 @@ bool do_compose_draw(easymedia::Flow *f,
 
 #include "term_help.h"
 
-static char optstr[] = "?i:w:h:";
+static char optstr[] = "?i:w:h:r:";
 
 int main(int argc, char **argv) {
   int c;
   std::string v4l2_video_path;
   int width = 1280, height = 720;
+  int rotate = 0;
   opterr = 1;
   while ((c = getopt(argc, argv, optstr)) != -1) {
     switch (c) {
@@ -480,13 +445,21 @@ int main(int argc, char **argv) {
     case 'h':
       height = atoi(optarg);
       break;
+    case 'r':
+      rotate = atoi(optarg);
+      if (rotate != 0) {
+        fprintf("TODO: rotate is not 0\n");
+        rotate = 0;
+      }
+      break;
     case '?':
     default:
       printf("help:\n\t-i: v4l2 capture device path\n");
       printf("\t-w: v4l2 capture width\n");
       printf("\t-h: v4l2 capture height\n");
+      printf("\t-r: display rotate\n");
       printf("\nusage example: \n");
-      printf("rk_npu_uvc_host -i /dev/video0 -w 1280 -h 720\n");
+      printf("rk_npu_uvc_host -i /dev/video0 -w 1280 -h 720 -r 270\n");
       exit(0);
     }
   }
@@ -497,7 +470,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Fail to create uvc extract flow\n");
     return -1;
   }
-  auto render_flow = std::make_shared<SDLComposeFlow>();
+  auto render_flow = std::make_shared<SDLComposeFlow>(rotate);
   if (!render_flow || render_flow->GetError()) {
     fprintf(stderr, "Fail to create sdl compose draw flow\n");
     return -1;
@@ -540,7 +513,7 @@ int main(int argc, char **argv) {
   while (true)
     easymedia::msleep(10);
 #endif
-
+  fprintf(stderr, "quit loop\n");
   v4l2_flow->RemoveDownFlow(extract_flow);
   v4l2_flow.reset();
   extract_flow->RemoveDownFlow(render_flow);
