@@ -21,6 +21,7 @@ elif test $rkisp_main; then
     input=$rkisp_main
     input_format=image:nv12
     need_3a=1
+    io -4 -w 0xfe8a0008 0xffff0202
 elif test $cifvideo; then
     input=$cifvideo
     input_format=image:nv16
@@ -38,5 +39,6 @@ fi
 # rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 \
 #         -m /userdata/ssd_inception_v2.rknn -n rknn_ssd:300x300
 
-rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 \
-        -n rockx_face_gender_age:300x300
+# gdb --args
+# rockx_face_gender_age:300x300
+rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 -n rockx_face_detect:300x300

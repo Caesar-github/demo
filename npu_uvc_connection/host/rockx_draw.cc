@@ -74,4 +74,31 @@ bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
   return true;
 }
 
+bool RockxFaceDetectDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
+                         NPUPostProcessOutput *output) {
+  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+  SDL_SetRenderDrawColor(renderer, 0xFF, 0x10, 0xEB, 0xFF);
+  int npu_w = output->npuwh.width;
+  int npu_h = output->npuwh.height;
+  auto fr = (struct aligned_rockx_face_rect *)(output->pp_output);
+  for (uint32_t i = 0; i < output->count; i++) {
+    assert(sizeof(float) == 4);
+    float score;
+    memcpy(&score, fr->score, 4);
+    if (score < 0.85)
+      continue;
+    int x1 = fr->left;
+    int y1 = fr->top;
+    int x2 = fr->right;
+    int y2 = fr->bottom;
+    SDL_Rect rect = {x1 * render_rect.w / npu_w + render_rect.x,
+                     y1 * render_rect.h / npu_h + render_rect.y,
+                     (x2 - x1) * render_rect.w / npu_w,
+                     (y2 - y1) * render_rect.h / npu_h};
+    SDL_RenderDrawRect(renderer, &rect);
+  }
+
+  return true;
+}
+
 } // namespace NPU_UVC_ROCKX_DEMO

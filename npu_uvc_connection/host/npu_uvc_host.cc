@@ -448,7 +448,7 @@ int main(int argc, char **argv) {
     case 'r':
       rotate = atoi(optarg);
       if (rotate != 0) {
-        fprintf("TODO: rotate is not 0\n");
+        fprintf(stderr, "TODO: rotate is not 0\n");
         rotate = 0;
       }
       break;

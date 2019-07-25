@@ -72,8 +72,11 @@ NPUPostProcessOutput::NPUPostProcessOutput(struct extra_jpeg_data *ejd)
     }
     memcpy(pp_output, ejd->outputs, ejd->npu_output_size);
     npuwh = ejd->npuwh;
-    if (!strcmp((const char *)ejd->model_identifier, "rockx_face_gender_age")) {
+    auto model_iden = (const char *)ejd->model_identifier;
+    if (!strcmp(model_iden, "rockx_face_gender_age")) {
       pp_func = NPU_UVC_ROCKX_DEMO::RockxFaceGenderAgeDraw;
+    } else if (!strcmp(model_iden, "rockx_face_detect")) {
+      pp_func = NPU_UVC_ROCKX_DEMO::RockxFaceDetectDraw;
     } else {
       fprintf(stderr, "TODO %s: %d\n", __FUNCTION__, __LINE__);
       goto fail;

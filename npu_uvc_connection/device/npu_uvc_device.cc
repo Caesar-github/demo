@@ -256,6 +256,8 @@ RockxFlow::RockxFlow(const std::string &model_str)
     models.push_back(ROCKX_MODULE_FACE_DETECTION);
     models.push_back(ROCKX_MODULE_FACE_LANDMARK_5);
     models.push_back(ROCKX_MODULE_FACE_ANALYZE);
+  } else if (model_str == "rockx_face_detect") {
+    models.push_back(ROCKX_MODULE_FACE_DETECTION);
   } else {
     assert(0);
   }
@@ -289,7 +291,7 @@ bool do_rockx(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
   if (name == "rockx_face_gender_age") {
     auto &tmp_img = flow->tmp_img;
     if (!tmp_img) {
-      tmp_img = easymedia::MediaBuffer::Alloc(112 * 112 * 3);
+      tmp_img = easymedia::MediaBuffer::Alloc(112 * 112 * 3 * 4);
       if (!tmp_img) {
         fprintf(stderr, "no memory\n");
         return false;
@@ -352,7 +354,37 @@ bool do_rockx(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
       return false;
     ret_buf->SetSize(count * sizeof(struct aligned_rockx_face_gender_age));
     ret_buf->SetValidSize(count);
-    flow->SetOutput(ret_buf, 0);
+    return flow->SetOutput(ret_buf, 0);
+  } else if (name == "rockx_face_detect") {
+    rockx_handle_t &face_det_handle = handles[0];
+    rockx_object_array_t face_array;
+    memset(&face_array, 0, sizeof(rockx_object_array_t));
+    rockx_ret_t ret =
+        rockx_face_detect(face_det_handle, &input_image, &face_array, nullptr);
+    if (ret != ROCKX_RET_SUCCESS) {
+      fprintf(stderr, "rockx_face_detect error %d\n", ret);
+      return false;
+    }
+    if (face_array.count <= 0)
+      return false;
+    size_t ret_buf_size =
+        face_array.count * sizeof(struct aligned_rockx_face_rect);
+    auto ret_buf = easymedia::MediaBuffer::Alloc(ret_buf_size);
+    if (!ret_buf)
+      return false;
+    auto face_rects = (struct aligned_rockx_face_rect *)ret_buf->GetPtr();
+    memset(face_rects, 0, ret_buf_size);
+    for (int i = 0; i < face_array.count; i++) {
+      auto array = &face_rects[i];
+      array->left = face_array.object[i].box.left;
+      array->top = face_array.object[i].box.top;
+      array->right = face_array.object[i].box.right;
+      array->bottom = face_array.object[i].box.bottom;
+      memcpy(array->score, &face_array.object[i].score, 4);
+    }
+    ret_buf->SetSize(ret_buf_size);
+    ret_buf->SetValidSize(face_array.count);
+    return flow->SetOutput(ret_buf, 0);
   } else {
     assert(0);
   }
@@ -610,7 +642,8 @@ int main(int argc, char **argv) {
   if (!strncmp(model_name.c_str(), "rockx_", 6)) {
 #if HAVE_ROCKX
     type_of_npu_output = TYPE_RK_ROCKX_OUTPUT;
-    if (model_name != "rockx_face_gender_age" && true) {
+    if (model_name != "rockx_face_gender_age" &&
+        model_name != "rockx_face_detect") {
       fprintf(stderr, "TODO for %s\n", model_name.c_str());
       assert(0);
       return -1;
@@ -683,7 +716,7 @@ int main(int argc, char **argv) {
                         KEY_V4L2_C_TYPE(VIDEO_CAPTURE));
     PARAM_STRING_APPEND(v4l2_param, KEY_V4L2_MEM_TYPE,
                         KEY_V4L2_M_TYPE(MEMORY_MMAP));
-    PARAM_STRING_APPEND_TO(v4l2_param, KEY_FRAMES, 4);
+    PARAM_STRING_APPEND_TO(v4l2_param, KEY_FRAMES, 8);
     PARAM_STRING_APPEND(v4l2_param, KEY_OUTPUTDATATYPE, format);
     PARAM_STRING_APPEND_TO(v4l2_param, KEY_BUFFER_WIDTH, width);
     PARAM_STRING_APPEND_TO(v4l2_param, KEY_BUFFER_HEIGHT, height);

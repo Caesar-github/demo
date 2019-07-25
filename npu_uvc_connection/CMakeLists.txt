@@ -35,9 +35,6 @@ add_executable(${RK_NPU_UVC_TARGET} ${RK_NPU_UVC_SRC})
 target_include_directories(${RK_NPU_UVC_TARGET}
                            PUBLIC ${LIBEASYMEDIA_INCLUDE_DIRS})
 
-# add_definitions(-fsanitize=address -static-libasan -fno-stack-protector -fno-
-# omit-frame-pointer -fno-var-tracking -g1)
-# target_link_libraries(rk_image_process asan)
 target_link_libraries(${RK_NPU_UVC_TARGET} ${RK_NPU_UVC_LIBRARY})
 
 install(TARGETS ${RK_NPU_UVC_TARGET} RUNTIME DESTINATION "bin")

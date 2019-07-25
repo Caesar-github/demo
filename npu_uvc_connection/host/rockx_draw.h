@@ -29,7 +29,9 @@ namespace NPU_UVC_ROCKX_DEMO {
 
 bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
                             NPUPostProcessOutput *output);
+bool RockxFaceDetectDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
+                         NPUPostProcessOutput *output);
 
-}
+} // namespace NPU_UVC_ROCKX_DEMO
 
 #endif // #ifndef NPU_UVC_ROCKX_DRAW_

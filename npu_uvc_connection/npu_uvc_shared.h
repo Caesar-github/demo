@@ -47,6 +47,14 @@ struct aligned_npu_output {
 } __attribute__((packed));
 
 // rockx output
+struct aligned_rockx_face_rect {
+  int32_t left;
+  int32_t top;
+  int32_t right;
+  int32_t bottom;
+  uint8_t score[4]; // assert(sizeof(float) == 4);
+} __attribute__((packed));
+
 struct aligned_rockx_face_gender_age {
   int32_t left;
   int32_t top;
