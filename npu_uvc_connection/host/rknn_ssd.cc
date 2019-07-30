@@ -31,8 +31,10 @@ namespace NPU_UVC_SSD_DEMO {
 
 static SDLFont sdl_font(red, 16);
 bool SSDDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
+             const SDL_Rect &coor_rect, int rotate,
              NPUPostProcessOutput *output);
 bool SSDDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
+             const SDL_Rect &coor_rect, int rotate,
              NPUPostProcessOutput *output) {
   int npu_w = output->npuwh.width;
   int npu_h = output->npuwh.height;
@@ -52,7 +54,8 @@ bool SSDDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
                      y1 * render_rect.h / npu_h + render_rect.y,
                      (x2 - x1) * render_rect.w / npu_w,
                      (y2 - y1) * render_rect.h / npu_h};
-    SDL_RenderDrawRect(renderer, &rect);
+    SDL_Rect line_rect = transform(rect, coor_rect, rotate);
+    SDL_RenderDrawRect(renderer, &line_rect);
     if (!det_result->name)
       continue;
     int fontw = 0, fonth = 0;
@@ -67,7 +70,8 @@ bool SSDDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
       dst_dimension.y = rect.y - 18;
       dst_dimension.w = texture_dimension.w;
       dst_dimension.h = texture_dimension.h;
-      SDL_RenderCopy(renderer, texture, &texture_dimension, &dst_dimension);
+      SDL_RenderCopyEx(renderer, texture, &texture_dimension, &dst_dimension,
+                       rotate, NULL, SDL_FLIP_NONE);
       SDL_DestroyTexture(texture);
     }
   }

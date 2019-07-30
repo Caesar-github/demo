@@ -28,8 +28,10 @@ class NPUPostProcessOutput;
 namespace NPU_UVC_ROCKX_DEMO {
 
 bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
+                            const SDL_Rect &coor_rect, int rotate,
                             NPUPostProcessOutput *output);
 bool RockxFaceDetectDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
+                         const SDL_Rect &coor_rect, int rotate,
                          NPUPostProcessOutput *output);
 
 } // namespace NPU_UVC_ROCKX_DEMO

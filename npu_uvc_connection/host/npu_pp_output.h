@@ -29,7 +29,10 @@
 class NPUPostProcessOutput;
 typedef bool (*PostDrawFunc)(SDL_Renderer *renderer,
                              const SDL_Rect &render_rect,
+                             const SDL_Rect &coor_rect, int rotate,
                              NPUPostProcessOutput *output);
+SDL_Rect transform(const SDL_Rect &src_rect, const SDL_Rect &coor_rect,
+                   int rotate);
 class NPUPostProcessOutput {
 public:
   NPUPostProcessOutput(struct extra_jpeg_data *input);

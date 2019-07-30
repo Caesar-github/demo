@@ -28,6 +28,7 @@ namespace NPU_UVC_ROCKX_DEMO {
 
 static SDLFont fga_sdl_font(red, 40);
 bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
+                            const SDL_Rect &coor_rect, int rotate,
                             NPUPostProcessOutput *output) {
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
   SDL_SetRenderDrawColor(renderer, 0xFF, 0x10, 0xEB, 0xFF);
@@ -53,7 +54,8 @@ bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
                      y1 * render_rect.h / npu_h + render_rect.y,
                      (x2 - x1) * render_rect.w / npu_w,
                      (y2 - y1) * render_rect.h / npu_h};
-    SDL_RenderDrawRect(renderer, &rect);
+    SDL_Rect line_rect = transform(rect, coor_rect, rotate);
+    SDL_RenderDrawRect(renderer, &line_rect);
     int fontw = 0, fonth = 0;
     SDL_Surface *str = fga_sdl_font.GetFontPicture(
         gender_age, strlen(gender_age), 32, &fontw, &fonth);
@@ -66,7 +68,8 @@ bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
       dst_dimension.y = rect.y - 36;
       dst_dimension.w = texture_dimension.w;
       dst_dimension.h = texture_dimension.h;
-      SDL_RenderCopy(renderer, texture, &texture_dimension, &dst_dimension);
+      SDL_RenderCopyEx(renderer, texture, &texture_dimension, &dst_dimension,
+                       rotate, NULL, SDL_FLIP_NONE);
       SDL_DestroyTexture(texture);
     }
   }
@@ -75,6 +78,7 @@ bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
 }
 
 bool RockxFaceDetectDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
+                         const SDL_Rect &coor_rect, int rotate,
                          NPUPostProcessOutput *output) {
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
   SDL_SetRenderDrawColor(renderer, 0xFF, 0x10, 0xEB, 0xFF);
@@ -85,7 +89,7 @@ bool RockxFaceDetectDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
     assert(sizeof(float) == 4);
     float score;
     memcpy(&score, fr->score, 4);
-    if (score < 0.85)
+    if (score < 0.8)
       continue;
     int x1 = fr->left;
     int y1 = fr->top;
@@ -95,6 +99,7 @@ bool RockxFaceDetectDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
                      y1 * render_rect.h / npu_h + render_rect.y,
                      (x2 - x1) * render_rect.w / npu_w,
                      (y2 - y1) * render_rect.h / npu_h};
+    rect = transform(rect, coor_rect, rotate);
     SDL_RenderDrawRect(renderer, &rect);
   }
 

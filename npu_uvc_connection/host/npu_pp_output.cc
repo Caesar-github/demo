@@ -95,6 +95,28 @@ fail:
   }
 }
 
+// rotate by center (coor_rect.w/2, coor_rect.h/2)
+SDL_Rect transform(const SDL_Rect &src_rect, const SDL_Rect &coor_rect,
+                   int rotate) {
+  SDL_Rect rect = src_rect;
+  switch (rotate) {
+  case 0:
+    break;
+  case 90:
+    rect.x = -src_rect.y - src_rect.h + coor_rect.h / 2 + coor_rect.w / 2;
+    rect.y = src_rect.x - coor_rect.w / 2 + coor_rect.h / 2;
+    rect.w = src_rect.h;
+    rect.h = src_rect.w;
+    break;
+  case 180:
+  case 270:
+  default:
+    fprintf(stderr, "TODO: rotate=%d\n", rotate);
+    break;
+  }
+  return rect;
+}
+
 #define FONT_FILE_PATH "/usr/lib/fonts/DejaVuSansMono.ttf"
 static SDL_Color white = {0xFF, 0xFF, 0xFF, 0x00};
 SDL_Color red = {0x00, 0x00, 0xFF, 0xFF};

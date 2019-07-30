@@ -386,15 +386,20 @@ bool do_compose_draw(easymedia::Flow *f,
   if (!ret) {
     SDL_Rect src_rect = {0, 0, img->GetWidth(), img->GetHeight()};
     dst_rect = flow->rect;
+    if (flow->rotate == 90 || flow->rotate == 270) {
+      dst_rect.x = (dst_rect.w - dst_rect.h) / 2;
+      dst_rect.y = (dst_rect.h - dst_rect.w) / 2;
+      std::swap<int>(dst_rect.w, dst_rect.h);
+    }
     if (src_rect.w * dst_rect.h > src_rect.h * dst_rect.w) {
       auto h = (dst_rect.w * src_rect.h) / src_rect.w;
       h &= ~1;
-      dst_rect.y = (dst_rect.h - h) / 2;
+      dst_rect.y += (dst_rect.h - h) / 2;
       dst_rect.h = h;
     } else {
       auto w = (dst_rect.h * src_rect.w) / src_rect.h;
       w &= ~1;
-      dst_rect.x = (dst_rect.w - w) / 2;
+      dst_rect.x += (dst_rect.w - w) / 2;
       dst_rect.w = w;
     }
     // fprintf(stderr, "src: %d,%d-%d,%d, dst: %d,%d-%d,%d\n", src_rect.x,
@@ -417,7 +422,7 @@ bool do_compose_draw(easymedia::Flow *f,
   }
   if (npu_out_put && dst_rect.w > 0 && dst_rect.h > 0) {
     auto npo = (NPUPostProcessOutput *)npu_out_put->GetPtr();
-    (npo->pp_func)(flow->renderer, dst_rect, npo);
+    (npo->pp_func)(flow->renderer, dst_rect, flow->rect, flow->rotate, npo);
   }
   SDL_RenderPresent(flow->renderer);
   return false;
@@ -447,8 +452,8 @@ int main(int argc, char **argv) {
       break;
     case 'r':
       rotate = atoi(optarg);
-      if (rotate != 0) {
-        fprintf(stderr, "TODO: rotate is not 0\n");
+      if (rotate != 0 && rotate != 90 && rotate != 180 && rotate != 270) {
+        fprintf(stderr, "TODO: rotate is not 0/90/180/270\n");
         rotate = 0;
       }
       break;

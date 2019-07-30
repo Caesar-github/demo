@@ -37,6 +37,7 @@ namespace NPU_UVC_SSD_DEMO {
 class NPUPostProcessOutput;
 namespace NPU_UVC_SSD_DEMO {
 bool SSDDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
+             const SDL_Rect &coor_rect, int rotate,
              NPUPostProcessOutput *output);
 }
 

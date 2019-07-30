@@ -3,21 +3,27 @@
 # call this on 3399
 
 input=/dev/video0
+uvcvideo=
 
-for dev in `ls /dev/video*`
+until [ $uvcvideo ]
 do
-    v4l2-ctl -d $dev -D | grep rkisp1_mainpath > /dev/null
-    if [ $? -eq 0 -a -z "$rkisp_main" ]; then rkisp_main=$dev; fi
-    v4l2-ctl -d $dev -D | grep uvcvideo > /dev/null
-    if [ $? -eq 0 -a -z "$uvcvideo" ]; then uvcvideo=$dev; fi
-    v4l2-ctl -d $dev -D | grep cif > /dev/null
-    if [ $? -eq 0 -a -z "$cifvideo" ]; then cifvideo=$dev; fi
+    for dev in `ls /dev/video*`
+    do
+        v4l2-ctl -d $dev -D | grep rkisp1_mainpath > /dev/null
+        if [ $? -eq 0 -a -z "$rkisp_main" ]; then rkisp_main=$dev; fi
+        v4l2-ctl -d $dev -D | grep uvcvideo > /dev/null
+        if [ $? -eq 0 -a -z "$uvcvideo" ]; then uvcvideo=$dev; fi
+        v4l2-ctl -d $dev -D | grep cif > /dev/null
+        if [ $? -eq 0 -a -z "$cifvideo" ]; then cifvideo=$dev; fi
+    done
+    if [ ! $1 ]; then break; fi
 done
 # uvc first, then rkisp
 echo uvcvideo=$uvcvideo,rkisp_main=$rkisp_main,cifvideo=$cifvideo
 
 if test $uvcvideo; then
     input=$uvcvideo
+    sleep 1
 else
     echo "no uvc camera found!"
     exit -1
