@@ -22,7 +22,7 @@ else
     echo "no uvc camera found!"
     exit -1
 fi
-
+export SDL2_DISPLAY_PLANE_TYPE=OVERLAY
 # PC: adb push external/rknpu/rknn/rknn_api/examples/rknn_ssd_demo/model/box_priors.txt /usr/bin/
 # PC: adb push external/rknpu/rknn/rknn_api/examples/rknn_ssd_demo/model/coco_labels_list.txt /usr/bin/
 rk_npu_uvc_host -i $input -w 1280 -h 720 -r 90

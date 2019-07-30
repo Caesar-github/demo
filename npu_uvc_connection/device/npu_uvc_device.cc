@@ -148,6 +148,7 @@ bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
   ejd.npu_output_type = flow->npu_output_type;
   snprintf((char *)ejd.model_identifier, sizeof(ejd.model_identifier),
            flow->model_identifier.c_str());
+  assert(sizeof(ejd) >= 4); // fake ffe2, set it must more or equal 4
   if (!npu_output_buf) {
     ejd.npu_outputs_timestamp = 0;
     ejd.npu_output_size = 0;
@@ -204,7 +205,8 @@ bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
       break;
     }
     if (new_ejd) {
-      fprintf(stderr, "set extra uvc data: %p, size: %d\n", new_ejd, (int)size);
+      // fprintf(stderr, "set extra uvc data: %p, size: %d\n", new_ejd,
+      // (int)size);
       uvc_read_camera_buffer(img_buf->GetPtr(), img_buf->GetValidSize(),
                              new_ejd, size);
       free(new_ejd);

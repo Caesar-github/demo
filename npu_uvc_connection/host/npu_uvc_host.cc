@@ -176,7 +176,7 @@ bool do_extract(easymedia::Flow *f,
   }
   std::shared_ptr<easymedia::MediaBuffer> npu_output;
   if (ejd->npu_output_size > 0) {
-    fprintf(stderr, "ejd->npu_output_size: %d\n", (int)ejd->npu_output_size);
+    // fprintf(stderr, "ejd->npu_output_size: %d\n", (int)ejd->npu_output_size);
     if (size != (sizeof(struct extra_jpeg_data) + ejd->npu_output_size)) {
       fprintf(stderr, "broken remote npu data!\n");
       return false;

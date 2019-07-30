@@ -31,14 +31,14 @@ fi
 #input_format=image:yuv420p
 uvc_MJPEG.sh 1280 720
 # PC: adb push external/rknpu/rknn/rknn_api/examples/rknn_ssd_demo/model/ssd_inception_v2.rknn /userdata/
-model_file=/userdata/ssd_inception_v2.rknn
-if [ ! -f $model_file ]; then
-    echo "miss $model_file"
-    exit -1
-fi
+# model_file=/userdata/ssd_inception_v2.rknn
+# if [ ! -f $model_file ]; then
+#     echo "miss $model_file"
+#     exit -1
+# fi
 # rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 \
 #         -m /userdata/ssd_inception_v2.rknn -n rknn_ssd:300x300
 
 # gdb --args
-# rockx_face_gender_age:300x300
+# rockx_face_gender_age:300x300 / rockx_face_detect:300x300
 rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 -n rockx_face_detect:300x300
