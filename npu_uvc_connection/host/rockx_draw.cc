@@ -54,8 +54,8 @@ bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
                      y1 * render_rect.h / npu_h + render_rect.y,
                      (x2 - x1) * render_rect.w / npu_w,
                      (y2 - y1) * render_rect.h / npu_h};
-    SDL_Rect line_rect = transform(rect, coor_rect, rotate);
-    SDL_RenderDrawRect(renderer, &line_rect);
+    rect = transform(rect, coor_rect, rotate);
+    SDL_RenderDrawRect(renderer, &rect);
     int fontw = 0, fonth = 0;
     SDL_Surface *str = fga_sdl_font.GetFontPicture(
         gender_age, strlen(gender_age), 32, &fontw, &fonth);
@@ -64,8 +64,22 @@ bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
       SDL_Texture *texture = load_texture(str, renderer, &texture_dimension);
       SDL_FreeSurface(str);
       SDL_Rect dst_dimension;
-      dst_dimension.x = rect.x;
-      dst_dimension.y = rect.y - 36;
+      switch (rotate) {
+      case 0:
+        dst_dimension.x = rect.x;
+        dst_dimension.y = rect.y - 36;
+        break;
+      case 90:
+        dst_dimension.x =
+            rect.x + rect.w + texture_dimension.h / 2 - texture_dimension.w / 2;
+        dst_dimension.y = rect.y + rect.h / 2 - texture_dimension.h / 2;
+        break;
+      default:
+        fprintf(stderr, "TODO: rotate=%d\n", rotate);
+        dst_dimension.x = rect.x;
+        dst_dimension.y = rect.y;
+        break;
+      }
       dst_dimension.w = texture_dimension.w;
       dst_dimension.h = texture_dimension.h;
       SDL_RenderCopyEx(renderer, texture, &texture_dimension, &dst_dimension,
