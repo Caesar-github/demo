@@ -37,10 +37,11 @@ bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
   char gender_age[32] = {0};
   static const char *man = "Gender: Man, Age:";
   static const char *women = "Gender: Women, Age:";
-  auto fga = (struct aligned_rockx_face_gender_age *)(output->pp_output);
+  auto face = (struct aligned_rockx_face_gender_age *)(output->pp_output);
   for (uint32_t i = 0; i < output->count; i++) {
     assert(sizeof(float) == 4);
     float score;
+    auto fga = face + i;
     memcpy(&score, fga->score, 4);
     if (score < 0.85)
       continue;
@@ -102,13 +103,14 @@ bool RockxFaceDetectDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
   for (uint32_t i = 0; i < output->count; i++) {
     assert(sizeof(float) == 4);
     float score;
-    memcpy(&score, fr->score, 4);
-    if (score < 0.8)
+    auto face = fr + i;
+    memcpy(&score, face->score, 4);
+    if (score < 0.8f)
       continue;
-    int x1 = fr->left;
-    int y1 = fr->top;
-    int x2 = fr->right;
-    int y2 = fr->bottom;
+    int x1 = face->left;
+    int y1 = face->top;
+    int x2 = face->right;
+    int y2 = face->bottom;
     SDL_Rect rect = {x1 * render_rect.w / npu_w + render_rect.x,
                      y1 * render_rect.h / npu_h + render_rect.y,
                      (x2 - x1) * render_rect.w / npu_w,
