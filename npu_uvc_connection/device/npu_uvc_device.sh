@@ -41,4 +41,4 @@ uvc_MJPEG.sh 1280 720
 
 # gdb --args
 # rockx_face_gender_age:300x300 / rockx_face_detect:300x300
-rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 -n rockx_face_detect:300x300
+rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 -n rockx_face_gender_age:300x300

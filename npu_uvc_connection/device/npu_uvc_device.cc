@@ -287,7 +287,7 @@ bool do_rockx(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
   input_image.width = input->GetWidth();
   input_image.height = input->GetHeight();
   input_image.data = (uint8_t *)input->GetPtr();
-  input_image.pixel_format = ROCKX_PIXEL_FORMAT_BGR888;
+  input_image.pixel_format = ROCKX_PIXEL_FORMAT_RGB888;
   auto &name = flow->model_identifier;
   auto &handles = flow->rockx_handles;
   if (name == "rockx_face_gender_age") {
@@ -328,9 +328,32 @@ bool do_rockx(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
         (struct aligned_rockx_face_gender_age *)ret_buf->GetPtr();
     memset(face_attribute_array, 0, ret_buf_size);
     size_t count = 0;
+    auto big = std::static_pointer_cast<easymedia::ImageBuffer>(
+        input->GetRelatedSPtrs()[0]);
+    assert(big);
+    rockx_image_t big_img;
+    big_img.width = big->GetWidth();
+    big_img.height = big->GetHeight();
+    big_img.pixel_format = ROCKX_PIXEL_FORMAT_RGB888;
+    big_img.data = (uint8_t *)big->GetPtr();
+    assert(big_img.data);
     for (int i = 0; i < face_array.count; i++) {
-      ret = rockx_face_align(face_5landmarks_handle, &input_image,
-                             &face_array.object[i].box, nullptr, &out_img);
+      if (face_array.object[i].score < 0.85)
+        continue; // save cpu
+      auto array = &face_attribute_array[count];
+      array->left = face_array.object[i].box.left;
+      array->top = face_array.object[i].box.top;
+      array->right = face_array.object[i].box.right;
+      array->bottom = face_array.object[i].box.bottom;
+      fprintf(stderr, "[%d]: %d,%d - %d,%d\n", i, array->left, array->top,
+              array->right, array->bottom);
+      rockx_rect_t crop_rect;
+      crop_rect.left = array->left * big_img.width / input_image.width;
+      crop_rect.top = array->top * big_img.height / input_image.height;
+      crop_rect.right = array->right * big_img.width / input_image.width;
+      crop_rect.bottom = array->bottom * big_img.height / input_image.height;
+      ret = rockx_face_align(face_5landmarks_handle, &big_img, &crop_rect,
+                             nullptr, &out_img);
       if (ret != ROCKX_RET_SUCCESS) {
         fprintf(stderr, "rockx_face_align error %d\n", ret);
         continue;
@@ -340,17 +363,15 @@ bool do_rockx(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
         fprintf(stderr, "rockx_face_attribute error %d\n", ret);
         continue;
       }
-      auto array = &face_attribute_array[count];
-      array->left = face_array.object[i].box.left;
-      array->top = face_array.object[i].box.top;
-      array->right = face_array.object[i].box.right;
-      array->bottom = face_array.object[i].box.bottom;
+      if (false) {
+        rockx_image_write("/data/big.jpg", &big_img);
+        rockx_image_write("/data/small.jpg", &input_image);
+        rockx_image_write("/data/aligned_face.jpg", &out_img);
+      }
       memcpy(array->score, &face_array.object[i].score, 4);
       array->gender = gender_age.gender;
       array->age = gender_age.age;
       count++;
-      // printf("faceid: %d\tgender: %d\tage: %d\n", i, gender_age.gender,
-      // gender_age.age);
     }
     if (count == 0)
       return false;
@@ -613,6 +634,27 @@ int main(int argc, char **argv) {
   }
 
   // rga
+  bool rga_need_hold_input = (model_name == "rockx_face_gender_age");
+  std::shared_ptr<easymedia::Flow> rga1;
+  if (rga_need_hold_input) {
+    std::string flow_name("filter");
+    std::string filter_name("rkrga");
+    std::string flow_param;
+    PARAM_STRING_APPEND(flow_param, KEY_NAME, filter_name);
+    PARAM_STRING_APPEND(flow_param, KEK_THREAD_SYNC_MODEL, KEY_ASYNCCOMMON);
+    PixelFormat rga_out_pix_fmt = GetPixFmtByString(IMAGE_RGB888);
+    ImageInfo out_img_info = {rga_out_pix_fmt, 0, 0, 0, 0};
+    flow_param.append(easymedia::to_param_string(out_img_info, false));
+    std::string rga_param;
+    std::vector<ImageRect> v = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    PARAM_STRING_APPEND(rga_param, KEY_BUFFER_RECT,
+                        easymedia::TwoImageRectToString(v));
+    rga1 = create_flow(flow_name, flow_param, rga_param);
+    if (!rga1) {
+      assert(0);
+      return -1;
+    }
+  }
   std::shared_ptr<easymedia::Flow> rga;
   do {
     std::string flow_name("filter");
@@ -623,9 +665,11 @@ int main(int argc, char **argv) {
     PixelFormat rga_out_pix_fmt = GetPixFmtByString(IMAGE_RGB888);
     ImageInfo out_img_info = {rga_out_pix_fmt, npu_width, npu_height, npu_width,
                               npu_height};
-    if (!decoder)
-      PARAM_STRING_APPEND(flow_param, KEY_INPUTDATATYPE, format);
+    // if (!decoder && !rga_need_hold_input)
+    //   PARAM_STRING_APPEND(flow_param, KEY_INPUTDATATYPE, format);
     flow_param.append(easymedia::to_param_string(out_img_info, false));
+    if (rga_need_hold_input)
+      PARAM_STRING_APPEND_TO(flow_param, KEY_OUTPUT_HOLD_INPUT, 1);
     std::string rga_param;
     std::vector<ImageRect> v = {{0, 0, width, height},
                                 {0, 0, npu_width, npu_height}};
@@ -729,11 +773,21 @@ int main(int argc, char **argv) {
     }
     if (decoder) {
       decoder->AddDownFlow(rga0, 0, 0);
-      decoder->AddDownFlow(rga, 0, 0);
+      if (rga_need_hold_input) {
+        decoder->AddDownFlow(rga1, 0, 0);
+        rga1->AddDownFlow(rga, 0, 0);
+      } else {
+        decoder->AddDownFlow(rga, 0, 0);
+      }
       rga0->AddDownFlow(uvc, 0, 0);
       v4l2_flow->AddDownFlow(decoder, 0, 0);
     } else {
-      v4l2_flow->AddDownFlow(rga, 0, 0);
+      if (rga_need_hold_input) {
+        rga1->AddDownFlow(rga, 0, 0);
+        v4l2_flow->AddDownFlow(rga1, 0, 0);
+      } else {
+        v4l2_flow->AddDownFlow(rga, 0, 0);
+      }
       v4l2_flow->AddDownFlow(uvc, 0, 0);
     }
   } while (0);
@@ -752,13 +806,25 @@ int main(int argc, char **argv) {
   if (decoder) {
     v4l2_flow->RemoveDownFlow(decoder);
     v4l2_flow.reset();
-    decoder->RemoveDownFlow(rga);
+    if (rga_need_hold_input) {
+      decoder->RemoveDownFlow(rga1);
+      rga1->RemoveDownFlow(rga);
+      rga1.reset();
+    } else {
+      decoder->RemoveDownFlow(rga);
+    }
     decoder->RemoveDownFlow(rga0);
     decoder.reset();
     rga0->RemoveDownFlow(uvc);
     rga0.reset();
   } else {
-    v4l2_flow->RemoveDownFlow(rga);
+    if (rga_need_hold_input) {
+      v4l2_flow->RemoveDownFlow(rga1);
+      rga1->RemoveDownFlow(rga);
+      rga1.reset();
+    } else {
+      v4l2_flow->RemoveDownFlow(rga);
+    }
     v4l2_flow->RemoveDownFlow(uvc);
     v4l2_flow.reset();
   }
