@@ -414,8 +414,9 @@ bool do_compose_draw(easymedia::Flow *f,
     flow->last_npu_output = npu_out_put;
   } else {
     if (flow->last_npu_output) {
-      auto diff =
-          img_buf->GetTimeStamp() - flow->last_npu_output->GetTimeStamp();
+      auto diff = (img_buf->GetUSTimeStamp() -
+                   flow->last_npu_output->GetUSTimeStamp()) /
+                  1000;
       if (diff >= 0 && diff < 500)
         npu_out_put = flow->last_npu_output;
     }

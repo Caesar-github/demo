@@ -144,7 +144,7 @@ bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
     return false;
   mpi_enc_set_format(ifmt);
   struct extra_jpeg_data ejd;
-  ejd.picture_timestamp = img_buf->GetTimeStamp();
+  ejd.picture_timestamp = img_buf->GetUSTimeStamp();
   ejd.npu_output_type = flow->npu_output_type;
   snprintf((char *)ejd.model_identifier, sizeof(ejd.model_identifier),
            flow->model_identifier.c_str());
@@ -165,7 +165,7 @@ bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
       size_t num = npu_output_buf->GetValidSize();
       ejd.npu_outputs_num = num;
       rknn_output *outputs = (rknn_output *)npu_output_buf->GetPtr();
-      ejd.npu_outputs_timestamp = npu_output_buf->GetTimeStamp();
+      ejd.npu_outputs_timestamp = npu_output_buf->GetUSTimeStamp();
       ejd.npu_output_size = num * sizeof(struct aligned_npu_output);
       for (size_t i = 0; i < num; i++)
         ejd.npu_output_size += outputs[i].size;
@@ -190,7 +190,7 @@ bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
       size_t num = npu_output_buf->GetValidSize();
       ejd.npu_outputs_num = num;
       // rknn_output *outputs = (rknn_output *)npu_output_buf->GetPtr();
-      ejd.npu_outputs_timestamp = npu_output_buf->GetTimeStamp();
+      ejd.npu_outputs_timestamp = npu_output_buf->GetUSTimeStamp();
       ejd.npu_output_size = npu_output_buf->GetSize();
       size = sizeof(ejd) + ejd.npu_output_size;
       new_ejd = (struct extra_jpeg_data *)malloc(size);
