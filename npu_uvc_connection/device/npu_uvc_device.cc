@@ -619,7 +619,7 @@ int main(int argc, char **argv) {
     std::string flow_param;
     PARAM_STRING_APPEND(flow_param, KEY_NAME, filter_name);
     PARAM_STRING_APPEND(flow_param, KEK_THREAD_SYNC_MODEL, KEY_ASYNCCOMMON);
-    PixelFormat rga_out_pix_fmt = GetPixFmtByString(IMAGE_NV12);
+    PixelFormat rga_out_pix_fmt = StringToPixFmt(IMAGE_NV12);
     ImageInfo out_img_info = {rga_out_pix_fmt, 0, 0, 0, 0};
     flow_param.append(easymedia::to_param_string(out_img_info, false));
     std::string rga_param;
@@ -642,7 +642,7 @@ int main(int argc, char **argv) {
     std::string flow_param;
     PARAM_STRING_APPEND(flow_param, KEY_NAME, filter_name);
     PARAM_STRING_APPEND(flow_param, KEK_THREAD_SYNC_MODEL, KEY_ASYNCCOMMON);
-    PixelFormat rga_out_pix_fmt = GetPixFmtByString(IMAGE_RGB888);
+    PixelFormat rga_out_pix_fmt = StringToPixFmt(IMAGE_RGB888);
     ImageInfo out_img_info = {rga_out_pix_fmt, 0, 0, 0, 0};
     flow_param.append(easymedia::to_param_string(out_img_info, false));
     std::string rga_param;
@@ -662,7 +662,7 @@ int main(int argc, char **argv) {
     std::string flow_param;
     PARAM_STRING_APPEND(flow_param, KEY_NAME, filter_name);
     PARAM_STRING_APPEND(flow_param, KEK_THREAD_SYNC_MODEL, KEY_ASYNCCOMMON);
-    PixelFormat rga_out_pix_fmt = GetPixFmtByString(IMAGE_RGB888);
+    PixelFormat rga_out_pix_fmt = StringToPixFmt(IMAGE_RGB888);
     ImageInfo out_img_info = {rga_out_pix_fmt, npu_width, npu_height, npu_width,
                               npu_height};
     // if (!decoder && !rga_need_hold_input)

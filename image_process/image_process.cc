@@ -4891,6 +4891,8 @@ bool NpuModelLeaf::Prepare(std::string model_name) {
     models.push_back(ROCKX_MODULE_FACE_DETECTION);
     models.push_back(ROCKX_MODULE_FACE_LANDMARK_5);
     models.push_back(ROCKX_MODULE_FACE_ANALYZE);
+  } else if (model_name == "face_detect") {
+    models.push_back(ROCKX_MODULE_FACE_DETECTION);
   } else {
     av_log(NULL, AV_LOG_FATAL, "TODO: %s\n", model_name.c_str());
     return false;
@@ -4954,6 +4956,48 @@ static SDL_Texture *load_texture(SDL_Surface *sur, SDL_Renderer *render,
   SDL_QueryTexture(texture, &pixelFormat, &access, &texture_dimensions->w,
                    &texture_dimensions->h);
   return texture;
+}
+
+static void *face_detect_process(std::vector<rockx_handle_t> &npu_handles,
+                                 rockx_image_t *input_image) {
+  rockx_handle_t face_det_handle = npu_handles[0];
+  rockx_object_array_t *face_array =
+      (rockx_object_array_t *)malloc(sizeof(rockx_object_array_t));
+  if (!face_array)
+    return nullptr;
+  memset(face_array, 0, sizeof(rockx_object_array_t));
+
+  rockx_ret_t ret =
+      rockx_face_detect(face_det_handle, input_image, face_array, nullptr);
+  if (ret != ROCKX_RET_SUCCESS) {
+    printf("rockx_face_detect error %d\n", ret);
+    free(face_array);
+    return nullptr;
+  }
+  return face_array;
+}
+
+static int face_detect_draw(void *npu_out, void *disp_ptr UNUSED, int disp_w,
+                            int disp_h, SDL_Renderer *render) {
+  static int w = FLAGS_npu_piece_width;
+  static int h = FLAGS_npu_piece_height;
+
+  rockx_object_array_t *face_array = (rockx_object_array_t *)npu_out;
+  SDL_SetRenderDrawBlendMode(render, SDL_BLENDMODE_NONE);
+  SDL_SetRenderDrawColor(render, 0xFF, 0x06, 0xEB, 0xFF);
+  for (int i = 0; i < face_array->count; i++) {
+    rockx_object_t &f = face_array->object[i];
+    if (f.score < 0.8)
+      continue;
+    auto left = f.box.left;
+    auto top = f.box.top;
+    auto right = f.box.right;
+    auto bottom = f.box.bottom;
+    SDL_Rect rect = {left * disp_w / w, top * disp_h / h,
+                     (right - left) * disp_w / w, (bottom - top) * disp_h / h};
+    SDL_RenderDrawRect(render, &rect);
+  }
+  return 0;
 }
 
 static void *face_landmark_process(std::vector<rockx_handle_t> &npu_handles,
@@ -5529,6 +5573,8 @@ static bool CreateNpuModel(ImageFilterLeaf *ifl, DrawOperation *draw,
                   pose_finger_draw, 2000);
     AddModelToMap("pose_body", "pose_body", pose_body_process, pose_body_draw,
                   300);
+    AddModelToMap("face_detect", "face_detect", face_detect_process,
+                  face_detect_draw, 300);
     AddModelToMap("face_landmark", "face_landmark", face_landmark_process,
                   face_landmark_draw, 300);
     AddModelToMap("face_attribute", "face_attribute", face_attribute_process,
