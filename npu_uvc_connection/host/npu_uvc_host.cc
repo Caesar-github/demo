@@ -188,13 +188,14 @@ bool do_extract(easymedia::Flow *f,
         npu_output->SetUserData(npp);
         npu_output->SetPtr(npp.get());
         npu_output->SetValidSize(sizeof(NPUPostProcessOutput));
-        npu_output->SetTimeStamp(ejd->npu_outputs_timestamp);
+        npu_output->SetUSTimeStamp(ejd->npu_outputs_timestamp);
       }
     }
   }
   // 2. decode
   auto decoder = flow->rkmpp_jpeg_dec;
-  auto img_output = std::make_shared<easymedia::ImageBuffer>();
+  std::shared_ptr<easymedia::MediaBuffer> img_output =
+      std::make_shared<easymedia::ImageBuffer>();
   if (decoder->Process(input, img_output))
     img_output = nullptr;
   bool ret = true;
@@ -202,7 +203,7 @@ bool do_extract(easymedia::Flow *f,
     ret = false;
   if (img_output) {
     assert(ejd);
-    img_output->SetTimeStamp(ejd->picture_timestamp);
+    img_output->SetUSTimeStamp(ejd->picture_timestamp);
     ret &= flow->SetOutput(img_output, 0);
   }
   if (npu_output)
