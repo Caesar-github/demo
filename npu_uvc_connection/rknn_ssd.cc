@@ -32,10 +32,10 @@ namespace NPU_UVC_SSD_DEMO {
 static SDLFont sdl_font(red, 16);
 bool SSDDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
              const SDL_Rect &coor_rect, int rotate,
-             NPUPostProcessOutput *output);
+             NPUPostProcessOutput *output, void *buffer, Uint32 sdl_fmt);
 bool SSDDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
              const SDL_Rect &coor_rect, int rotate,
-             NPUPostProcessOutput *output) {
+             NPUPostProcessOutput *output, void *buffer, Uint32 sdl_fmt) {
   int npu_w = output->npuwh.width;
   int npu_h = output->npuwh.height;
   auto group = (NPU_UVC_SSD_DEMO::detect_result_group_t *)(output->pp_output);
@@ -55,7 +55,9 @@ bool SSDDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
                      (x2 - x1) * render_rect.w / npu_w,
                      (y2 - y1) * render_rect.h / npu_h};
     SDL_Rect line_rect = transform(rect, coor_rect, rotate);
-    SDL_RenderDrawRect(renderer, &line_rect);
+    int status = draw_rect(renderer, &line_rect, buffer, sdl_fmt);
+    if (status)
+      fprintf(stderr, "draw rect status: %d <%s>\n", status, SDL_GetError());
     if (!det_result->name)
       continue;
     int fontw = 0, fonth = 0;

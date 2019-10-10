@@ -29,7 +29,8 @@ namespace NPU_UVC_ROCKX_DEMO {
 static SDLFont fga_sdl_font(red, 40);
 bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
                             const SDL_Rect &coor_rect, int rotate,
-                            NPUPostProcessOutput *output) {
+                            NPUPostProcessOutput *output, void *buffer,
+                            Uint32 sdl_fmt) {
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
   SDL_SetRenderDrawColor(renderer, 0xFF, 0x10, 0xEB, 0xFF);
   int npu_w = output->npuwh.width;
@@ -56,7 +57,9 @@ bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
                      (x2 - x1) * render_rect.w / npu_w,
                      (y2 - y1) * render_rect.h / npu_h};
     rect = transform(rect, coor_rect, rotate);
-    SDL_RenderDrawRect(renderer, &rect);
+    int status = draw_rect(renderer, &rect, buffer, sdl_fmt);
+    if (status)
+      fprintf(stderr, "draw rect status: %d <%s>\n", status, SDL_GetError());
     int fontw = 0, fonth = 0;
     SDL_Surface *str = fga_sdl_font.GetFontPicture(
         gender_age, strlen(gender_age), 32, &fontw, &fonth);
@@ -94,7 +97,8 @@ bool RockxFaceGenderAgeDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
 
 bool RockxFaceDetectDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
                          const SDL_Rect &coor_rect, int rotate,
-                         NPUPostProcessOutput *output) {
+                         NPUPostProcessOutput *output, void *buffer,
+                         Uint32 sdl_fmt) {
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
   SDL_SetRenderDrawColor(renderer, 0xFF, 0x10, 0xEB, 0xFF);
   int npu_w = output->npuwh.width;
@@ -116,7 +120,9 @@ bool RockxFaceDetectDraw(SDL_Renderer *renderer, const SDL_Rect &render_rect,
                      (x2 - x1) * render_rect.w / npu_w,
                      (y2 - y1) * render_rect.h / npu_h};
     rect = transform(rect, coor_rect, rotate);
-    SDL_RenderDrawRect(renderer, &rect);
+    int status = draw_rect(renderer, &rect, buffer, sdl_fmt);
+    if (status)
+      fprintf(stderr, "draw rect status: %d <%s>\n", status, SDL_GetError());
   }
 
   return true;

@@ -30,7 +30,8 @@ class NPUPostProcessOutput;
 typedef bool (*PostDrawFunc)(SDL_Renderer *renderer,
                              const SDL_Rect &render_rect,
                              const SDL_Rect &coor_rect, int rotate,
-                             NPUPostProcessOutput *output);
+                             NPUPostProcessOutput *output, void *buffer,
+                             Uint32 sdl_fmt);
 SDL_Rect transform(const SDL_Rect &src_rect, const SDL_Rect &coor_rect,
                    int rotate);
 class NPUPostProcessOutput {
@@ -64,5 +65,7 @@ public:
 extern SDL_Color red;
 SDL_Texture *load_texture(SDL_Surface *sur, SDL_Renderer *render,
                           SDL_Rect *texture_dimensions);
+int draw_rect(SDL_Renderer *renderer, const SDL_Rect *rect, void *buffer,
+              Uint32 sdl_fmt);
 
 #endif // #ifndef NPU_UVC_PP_OUTPUT_

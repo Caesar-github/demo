@@ -246,3 +246,42 @@ SDL_Texture *load_texture(SDL_Surface *sur, SDL_Renderer *render,
                    &texture_dimensions->h);
   return texture;
 }
+
+int draw_rect(SDL_Renderer *renderer, const SDL_Rect *rect, void *buffer,
+              Uint32 sdl_fmt) {
+  int status = SDL_RenderDrawRect(renderer, rect);
+  if (status && sdl_fmt == SDL_PIXELFORMAT_RGB24) {
+    Uint8 r, g, b, a;
+    SDL_GetRenderDrawColor(renderer, &r, &g, &b, &a);
+    SDL_Rect viewport;
+    SDL_RenderGetViewport(renderer, &viewport);
+    uint8_t *ptr = (uint8_t *)buffer + (rect->x + rect->y * viewport.w) * 3;
+    uint8_t *p = ptr;
+    for (int i = 0; i < rect->w; i++) {
+      *p++ = r;
+      *p++ = g;
+      *p++ = b;
+    }
+    p = ptr;
+    for (int i = 0; i < rect->h; i++) {
+      *p = r;
+      *(p + 1) = g;
+      *(p + 2) = b;
+      p += viewport.w * 3;
+    }
+    for (int i = 0; i < rect->w; i++) {
+      *p++ = r;
+      *p++ = g;
+      *p++ = b;
+    }
+    p = ptr + rect->w * 3;
+    for (int i = 0; i < rect->h; i++) {
+      *p = r;
+      *(p + 1) = g;
+      *(p + 2) = b;
+      p += viewport.w * 3;
+    }
+    status = 0;
+  }
+  return status;
+}

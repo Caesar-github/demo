@@ -36,9 +36,9 @@ uvc_MJPEG.sh 1280 720
 #     echo "miss $model_file"
 #     exit -1
 # fi
-# rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 \
+# rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 -r 0 \
 #         -m /userdata/ssd_inception_v2.rknn -n rknn_ssd:300x300
 
 # gdb --args
 # rockx_face_gender_age:300x300 / rockx_face_detect:300x300
-rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 -n rockx_face_gender_age:300x300
+rk_npu_uvc_device -i $input -c $need_3a -f $input_format -w 1280 -h 720 -r 1 -n rockx_face_gender_age:300x300

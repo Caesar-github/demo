@@ -47,7 +47,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 
-#include "npu_pp_output.h"
+#include "../npu_pp_output.h"
 
 static std::shared_ptr<easymedia::Flow>
 create_flow(const std::string &flow_name, const std::string &flow_param,
@@ -424,7 +424,8 @@ bool do_compose_draw(easymedia::Flow *f,
   }
   if (npu_out_put && dst_rect.w > 0 && dst_rect.h > 0) {
     auto npo = (NPUPostProcessOutput *)npu_out_put->GetPtr();
-    (npo->pp_func)(flow->renderer, dst_rect, flow->rect, flow->rotate, npo);
+    (npo->pp_func)(flow->renderer, dst_rect, flow->rect, flow->rotate, npo,
+                   nullptr, sdl_fmt);
   }
   SDL_RenderPresent(flow->renderer);
   return false;

@@ -52,6 +52,9 @@ extern "C" {
 #include <uvc/uvc_video.h>
 }
 
+#include "../npu_pp_output.h"
+#include <SDL2/SDL.h>
+
 #include <camera_engine_rkisp/interface/mediactl.h>
 #include <camera_engine_rkisp/interface/rkisp_control_loop.h>
 
@@ -62,7 +65,7 @@ static bool do_uvc(easymedia::Flow *f,
 class UVCJoinFlow : public easymedia::Flow {
 public:
   UVCJoinFlow(uint32_t npu_output_type, const std::string &model,
-              uint32_t npu_w, uint32_t npu_h);
+              uint32_t npu_w, uint32_t npu_h, bool render);
   virtual ~UVCJoinFlow() {
     StopAllThread();
     uvc_video_id_exit_all();
@@ -74,23 +77,26 @@ private:
   std::string model_identifier;
   uint32_t npu_width;
   uint32_t npu_height;
+  bool render_npu_result;
   friend bool do_uvc(easymedia::Flow *f,
                      easymedia::MediaBufferVector &input_vector);
 };
 
 UVCJoinFlow::UVCJoinFlow(uint32_t type, const std::string &model,
-                         uint32_t npu_w, uint32_t npu_h)
+                         uint32_t npu_w, uint32_t npu_h, bool render)
     : npu_output_type(type), model_identifier(model), npu_width(npu_w),
-      npu_height(npu_h) {
+      npu_height(npu_h), render_npu_result(render) {
   easymedia::SlotMap sm;
   sm.thread_model = easymedia::Model::ASYNCCOMMON;
   sm.mode_when_full = easymedia::InputMode::DROPFRONT;
   sm.input_slots.push_back(0);
   sm.input_maxcachenum.push_back(2);
   sm.fetch_block.push_back(true);
-  sm.input_slots.push_back(1);
-  sm.input_maxcachenum.push_back(1);
-  sm.fetch_block.push_back(false);
+  if (!render) {
+    sm.input_slots.push_back(1);
+    sm.input_maxcachenum.push_back(1);
+    sm.fetch_block.push_back(false);
+  }
   sm.process = do_uvc;
   if (!InstallSlotMap(sm, "uvc_extract", -1)) {
     fprintf(stderr, "Fail to InstallSlotMap, %s\n", "uvc_join");
@@ -131,12 +137,70 @@ static MppFrameFormat ConvertToMppPixFmt(const PixelFormat &fmt) {
   return (MppFrameFormat)-1;
 }
 
+static struct extra_jpeg_data *
+serialize(struct extra_jpeg_data &ejd,
+          std::shared_ptr<easymedia::MediaBuffer> &npu_output_buf,
+          size_t &size) {
+  struct extra_jpeg_data *new_ejd = nullptr;
+  switch (ejd.npu_output_type) {
+  case TYPE_RK_NPU_OUTPUT: {
+    size_t num = npu_output_buf->GetValidSize();
+    ejd.npu_outputs_num = num;
+    rknn_output *outputs = (rknn_output *)npu_output_buf->GetPtr();
+    ejd.npu_outputs_timestamp = npu_output_buf->GetUSTimeStamp();
+    ejd.npu_output_size = num * sizeof(struct aligned_npu_output);
+    for (size_t i = 0; i < num; i++)
+      ejd.npu_output_size += outputs[i].size;
+    size = sizeof(ejd) + ejd.npu_output_size;
+    new_ejd = (struct extra_jpeg_data *)malloc(size);
+    if (!new_ejd)
+      return nullptr;
+    *new_ejd = ejd;
+    uint32_t pos = 0;
+    for (size_t i = 0; i < num; i++) {
+      struct aligned_npu_output *an =
+          (struct aligned_npu_output *)(new_ejd->outputs + pos);
+      an->want_float = outputs[i].want_float;
+      an->is_prealloc = outputs[i].is_prealloc;
+      an->index = outputs[i].index;
+      an->size = outputs[i].size;
+      memcpy(an->buf, outputs[i].buf, outputs[i].size);
+      pos += (sizeof(*an) + outputs[i].size);
+    }
+  } break;
+  case TYPE_RK_ROCKX_OUTPUT: {
+    size_t num = npu_output_buf->GetValidSize();
+    ejd.npu_outputs_num = num;
+    // rknn_output *outputs = (rknn_output *)npu_output_buf->GetPtr();
+    ejd.npu_outputs_timestamp = npu_output_buf->GetUSTimeStamp();
+    ejd.npu_output_size = npu_output_buf->GetSize();
+    size = sizeof(ejd) + ejd.npu_output_size;
+    new_ejd = (struct extra_jpeg_data *)malloc(size);
+    if (!new_ejd)
+      return nullptr;
+    *new_ejd = ejd;
+    memcpy(new_ejd->outputs, npu_output_buf->GetPtr(), ejd.npu_output_size);
+  } break;
+  default:
+    fprintf(stderr, "unimplemented rk nn output type: %d\n",
+            ejd.npu_output_type);
+  }
+  return new_ejd;
+}
+
 bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
   UVCJoinFlow *flow = (UVCJoinFlow *)f;
   auto img_buf = input_vector[0];
-  auto &npu_output_buf = input_vector[1];
   if (!img_buf || img_buf->GetType() != Type::Image)
     return false;
+  std::shared_ptr<easymedia::MediaBuffer> npu_output_buf;
+  if (flow->render_npu_result) {
+    auto vec = img_buf->GetRelatedSPtrs();
+    if (vec.size() > 0)
+      npu_output_buf = std::static_pointer_cast<easymedia::MediaBuffer>(vec[0]);
+  } else {
+    npu_output_buf = input_vector[1];
+  }
   auto img = std::static_pointer_cast<easymedia::ImageBuffer>(img_buf);
   MppFrameFormat ifmt = ConvertToMppPixFmt(img->GetPixelFormat());
   assert(ifmt == MPP_FMT_YUV420SP);
@@ -158,59 +222,17 @@ bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
                            sizeof(ejd));
   } else {
     size_t size = 0;
-    struct extra_jpeg_data *new_ejd = nullptr;
     ejd.npuwh.width = flow->npu_width;
     ejd.npuwh.height = flow->npu_height;
-    switch (ejd.npu_output_type) {
-    case TYPE_RK_NPU_OUTPUT: {
-      size_t num = npu_output_buf->GetValidSize();
-      ejd.npu_outputs_num = num;
-      rknn_output *outputs = (rknn_output *)npu_output_buf->GetPtr();
-      ejd.npu_outputs_timestamp = npu_output_buf->GetUSTimeStamp();
-      ejd.npu_output_size = num * sizeof(struct aligned_npu_output);
-      for (size_t i = 0; i < num; i++)
-        ejd.npu_output_size += outputs[i].size;
-      size = sizeof(ejd) + ejd.npu_output_size;
-      new_ejd = (struct extra_jpeg_data *)malloc(size);
-      if (!new_ejd)
-        return false;
-      *new_ejd = ejd;
-      uint32_t pos = 0;
-      for (size_t i = 0; i < num; i++) {
-        struct aligned_npu_output *an =
-            (struct aligned_npu_output *)(new_ejd->outputs + pos);
-        an->want_float = outputs[i].want_float;
-        an->is_prealloc = outputs[i].is_prealloc;
-        an->index = outputs[i].index;
-        an->size = outputs[i].size;
-        memcpy(an->buf, outputs[i].buf, outputs[i].size);
-        pos += (sizeof(*an) + outputs[i].size);
-      }
-    } break;
-    case TYPE_RK_ROCKX_OUTPUT: {
-      size_t num = npu_output_buf->GetValidSize();
-      ejd.npu_outputs_num = num;
-      // rknn_output *outputs = (rknn_output *)npu_output_buf->GetPtr();
-      ejd.npu_outputs_timestamp = npu_output_buf->GetUSTimeStamp();
-      ejd.npu_output_size = npu_output_buf->GetSize();
-      size = sizeof(ejd) + ejd.npu_output_size;
-      new_ejd = (struct extra_jpeg_data *)malloc(size);
-      if (!new_ejd)
-        return false;
-      *new_ejd = ejd;
-      memcpy(new_ejd->outputs, npu_output_buf->GetPtr(), ejd.npu_output_size);
-    } break;
-    default:
-      fprintf(stderr, "unimplemented rk nn output type: %d\n",
-              ejd.npu_output_type);
-      break;
-    }
+    struct extra_jpeg_data *new_ejd = serialize(ejd, npu_output_buf, size);
     if (new_ejd) {
       // fprintf(stderr, "set extra uvc data: %p, size: %d\n", new_ejd,
       // (int)size);
       uvc_read_camera_buffer(img_buf->GetPtr(), img_buf->GetValidSize(),
                              new_ejd, size);
       free(new_ejd);
+    } else {
+      return false;
     }
   }
   return true;
@@ -222,7 +244,7 @@ static bool do_rockx(easymedia::Flow *f,
                      easymedia::MediaBufferVector &input_vector);
 class RockxFlow : public easymedia::Flow {
 public:
-  RockxFlow(const std::string &model);
+  RockxFlow(const std::string &model, bool hand_over_big_pic);
   virtual ~RockxFlow() {
     StopAllThread();
     for (auto handle : rockx_handles)
@@ -233,12 +255,13 @@ private:
   std::string model_identifier;
   std::vector<rockx_handle_t> rockx_handles;
   std::shared_ptr<easymedia::MediaBuffer> tmp_img;
+  bool hand_over_big_pic;
   friend bool do_rockx(easymedia::Flow *f,
                        easymedia::MediaBufferVector &input_vector);
 };
 
-RockxFlow::RockxFlow(const std::string &model_str)
-    : model_identifier(model_str) {
+RockxFlow::RockxFlow(const std::string &model_str, bool hand_over_pic)
+    : model_identifier(model_str), hand_over_big_pic(hand_over_pic) {
   easymedia::SlotMap sm;
   sm.thread_model = easymedia::Model::ASYNCCOMMON;
   sm.mode_when_full = easymedia::InputMode::DROPFRONT;
@@ -246,6 +269,9 @@ RockxFlow::RockxFlow(const std::string &model_str)
   sm.input_maxcachenum.push_back(2);
   sm.fetch_block.push_back(true);
   sm.output_slots.push_back(0);
+  if (hand_over_big_pic) {
+    sm.hold_input.push_back(easymedia::HoldInputMode::INHERIT_FORM_INPUT);
+  }
   sm.process = do_rockx;
   if (!InstallSlotMap(sm, "rockx", -1)) {
     fprintf(stderr, "Fail to InstallSlotMap, %s\n", "rockx");
@@ -417,6 +443,104 @@ bool do_rockx(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
 
 #endif // #if HAVE_ROCKX
 
+static bool do_sdl_draw(easymedia::Flow *f,
+                        easymedia::MediaBufferVector &input_vector);
+class SDLDrawFlow : public easymedia::Flow {
+public:
+  SDLDrawFlow(uint32_t type, const std::string &model, uint32_t npu_w,
+              uint32_t npu_h)
+      : npu_output_type(type), model_identifier(model), npu_width(npu_w),
+        npu_height(npu_h) {
+    easymedia::SlotMap sm;
+    sm.thread_model = easymedia::Model::ASYNCATOMIC;
+    sm.mode_when_full = easymedia::InputMode::DROPFRONT;
+    sm.input_slots.push_back(0);
+    sm.input_maxcachenum.push_back(1);
+    sm.output_slots.push_back(0);
+    sm.process = do_sdl_draw;
+    if (!InstallSlotMap(sm, "sdl_draw", -1)) {
+      fprintf(stderr, "Fail to InstallSlotMap, %s\n", "sdl_draw");
+      SetError(-EINVAL);
+      return;
+    }
+  }
+  virtual ~SDLDrawFlow() {
+    StopAllThread();
+    fprintf(stderr, "sdl draw flow quit\n");
+  }
+
+  uint32_t npu_output_type;
+  std::string model_identifier;
+  uint32_t npu_width;
+  uint32_t npu_height;
+  friend bool do_sdl_draw(easymedia::Flow *f,
+                          easymedia::MediaBufferVector &input_vector);
+};
+
+bool do_sdl_draw(easymedia::Flow *f,
+                 easymedia::MediaBufferVector &input_vector) {
+  auto flow = static_cast<SDLDrawFlow *>(f);
+  auto &npu_output_buf = input_vector[0];
+  if (!npu_output_buf)
+    return false;
+  bool ret = false;
+  auto img = std::static_pointer_cast<easymedia::ImageBuffer>(
+      npu_output_buf->GetRelatedSPtrs()[0]);
+  static Uint32 sdl_fmt = SDL_PIXELFORMAT_RGB24;
+  SDL_Surface *surface = nullptr;
+  SDL_Renderer *renderer = nullptr;
+  static SDL_Rect dst_rect = {0, 0, img->GetWidth(), img->GetHeight()};
+  struct extra_jpeg_data ejd;
+  struct extra_jpeg_data *new_ejd = nullptr;
+  size_t size = 0;
+  if (!npu_output_buf->IsValid())
+    goto out;
+  ejd.picture_timestamp = img->GetUSTimeStamp();
+  ejd.npu_output_type = flow->npu_output_type;
+  snprintf((char *)ejd.model_identifier, sizeof(ejd.model_identifier),
+           flow->model_identifier.c_str());
+  ejd.npuwh.width = flow->npu_width;
+  ejd.npuwh.height = flow->npu_height;
+  new_ejd = serialize(ejd, npu_output_buf, size);
+  if (!new_ejd)
+    goto out;
+  SDL_LogSetPriority(SDL_LOG_CATEGORY_VIDEO, SDL_LOG_PRIORITY_VERBOSE);
+  SDL_LogSetPriority(SDL_LOG_CATEGORY_RENDER, SDL_LOG_PRIORITY_VERBOSE);
+  surface = SDL_CreateRGBSurfaceWithFormatFrom(img->GetPtr(), img->GetWidth(),
+                                               img->GetHeight(), 24,
+                                               img->GetWidth() * 3, sdl_fmt);
+  if (!surface) {
+    fprintf(stderr, "SDL_CreateRGBSurfaceWithFormatFrom failed at line %d\n",
+            __LINE__);
+    goto err;
+  }
+  renderer = SDL_CreateSoftwareRenderer(surface);
+  if (!renderer) {
+    fprintf(stderr, "SDL_CreateSoftwareRenderer failed at line %d\n", __LINE__);
+    goto err;
+  }
+  do {
+    NPUPostProcessOutput npo(new_ejd);
+    (npo.pp_func)(renderer, dst_rect, dst_rect, 0, &npo, img->GetPtr(),
+                  sdl_fmt);
+  } while (0);
+  SDL_RenderPresent(renderer);
+
+out:
+  npu_output_buf->GetRelatedSPtrs().clear();
+  img->SetRelatedSPtr(npu_output_buf, 0);
+  ret = flow->SetOutput(img, 0);
+
+err:
+  if (new_ejd)
+    free(new_ejd);
+  if (renderer)
+    SDL_DestroyRenderer(renderer);
+  if (surface)
+    SDL_FreeSurface(surface);
+  return ret;
+}
+
 struct RKisp_media_ctl {
   /* media controller */
   struct media_device *controller;
@@ -525,7 +649,15 @@ static void *camera_engine_rkisp_start(const std::string &device_name) {
 
 #include "term_help.h"
 
-static char optstr[] = "?i:c:w:h:f:m:n:";
+// i : input path of camera
+// c : need 3a
+// w : input width of camera
+// h : input height of camera
+// f : input format of camera
+// m : npu model path, if normal rknn api, not rockx
+// n : model_name with input w/h model needs
+// r : render npu result on video picture
+static char optstr[] = "?i:c:w:h:f:m:n:r:";
 
 int main(int argc, char **argv) {
   int c;
@@ -536,6 +668,7 @@ int main(int argc, char **argv) {
   std::string model_path;
   std::string model_name;
   bool need_3a = false;
+  bool render_result = false;
 
   opterr = 1;
   while ((c = getopt(argc, argv, optstr)) != -1) {
@@ -570,6 +703,9 @@ int main(int argc, char **argv) {
       int ret = sscanf(s + 1, "%dx%d\n", &npu_width, &npu_height);
       assert(ret == 2);
     } break;
+    case 'r':
+      render_result = !!atoi(optarg);
+      break;
     case '?':
     default:
       printf("help:\n\t-i: v4l2 capture device path\n");
@@ -602,6 +738,9 @@ int main(int argc, char **argv) {
     std::string codec_name("rkmpp");
     std::string flow_param;
     PARAM_STRING_APPEND(flow_param, KEY_NAME, codec_name);
+    if (render_result)
+      PARAM_STRING_APPEND_TO(flow_param, KEY_OUTPUT_HOLD_INPUT,
+                             (int)easymedia::HoldInputMode::INHERIT_FORM_INPUT);
     std::string dec_param;
     PARAM_STRING_APPEND(dec_param, KEY_INPUTDATATYPE, format);
     // set output data type work only for jpeg, but except 1808
@@ -614,7 +753,8 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (decoder || format != IMAGE_NV12) { // uvc only support nv12
+  // uvc only support nv12
+  if (decoder || format != IMAGE_NV12 || render_result) {
     std::string flow_name("filter");
     std::string filter_name("rkrga");
     std::string flow_param;
@@ -635,7 +775,8 @@ int main(int argc, char **argv) {
   }
 
   // rga
-  bool rga_need_hold_input = (model_name == "rockx_face_gender_age");
+  bool rga_need_hold_input =
+      (model_name == "rockx_face_gender_age") || render_result;
   std::shared_ptr<easymedia::Flow> rga1;
   if (rga_need_hold_input) {
     std::string flow_name("filter");
@@ -670,7 +811,8 @@ int main(int argc, char **argv) {
     //   PARAM_STRING_APPEND(flow_param, KEY_INPUTDATATYPE, format);
     flow_param.append(easymedia::to_param_string(out_img_info, false));
     if (rga_need_hold_input)
-      PARAM_STRING_APPEND_TO(flow_param, KEY_OUTPUT_HOLD_INPUT, 1);
+      PARAM_STRING_APPEND_TO(flow_param, KEY_OUTPUT_HOLD_INPUT,
+                             (int)easymedia::HoldInputMode::HOLD_INPUT);
     std::string rga_param;
     std::vector<ImageRect> v = {{0, 0, width, height},
                                 {0, 0, npu_width, npu_height}};
@@ -695,7 +837,7 @@ int main(int argc, char **argv) {
       assert(0);
       return -1;
     }
-    rknn = std::make_shared<RockxFlow>(model_name);
+    rknn = std::make_shared<RockxFlow>(model_name, render_result);
     if (!rknn || rknn->GetError()) {
       fprintf(stderr, "Fail to create rockx flow\n");
       return -1;
@@ -714,6 +856,10 @@ int main(int argc, char **argv) {
       PARAM_STRING_APPEND(flow_param, KEY_NAME, filter_name);
       PARAM_STRING_APPEND(flow_param, KEK_THREAD_SYNC_MODEL, KEY_ASYNCCOMMON);
       PARAM_STRING_APPEND(flow_param, KEY_INPUTDATATYPE, IMAGE_RGB888);
+      if (render_result)
+        PARAM_STRING_APPEND_TO(
+            flow_param, KEY_OUTPUT_HOLD_INPUT,
+            (int)easymedia::HoldInputMode::INHERIT_FORM_INPUT);
       std::string rknn_param;
       PARAM_STRING_APPEND(rknn_param, KEY_PATH, model_path);
       std::string str_tensor_type;
@@ -741,13 +887,28 @@ int main(int argc, char **argv) {
   rga->AddDownFlow(rknn, 0, 0);
 
   // uvc
-  auto uvc = std::make_shared<UVCJoinFlow>(type_of_npu_output, model_name,
-                                           npu_width, npu_height);
+  auto uvc = std::make_shared<UVCJoinFlow>(
+      type_of_npu_output, model_name, npu_width, npu_height, render_result);
   if (!uvc || uvc->GetError() || !uvc->Init()) {
     fprintf(stderr, "Fail to create uvc\n");
     return -1;
   }
-  rknn->AddDownFlow(uvc, 0, 1);
+
+  // render
+  std::shared_ptr<SDLDrawFlow> render;
+  if (render_result) {
+    render = std::make_shared<SDLDrawFlow>(type_of_npu_output, model_name,
+                                           npu_width, npu_height);
+    if (!render || render->GetError()) {
+      fprintf(stderr, "Fail to create sdl draw flow\n");
+      return -1;
+    }
+  }
+
+  if (render)
+    rknn->AddDownFlow(render, 0, 0);
+  else
+    rknn->AddDownFlow(uvc, 0, 1);
 
   // finally, create v4l2 flow
   std::shared_ptr<easymedia::Flow> v4l2_flow;
@@ -772,28 +933,40 @@ int main(int argc, char **argv) {
       assert(0);
       return -1;
     }
-    if (decoder) {
-      decoder->AddDownFlow(rga0, 0, 0);
-      if (rga_need_hold_input) {
-        decoder->AddDownFlow(rga1, 0, 0);
-        rga1->AddDownFlow(rga, 0, 0);
-      } else {
-        decoder->AddDownFlow(rga, 0, 0);
-      }
+    if (render_result) {
       rga0->AddDownFlow(uvc, 0, 0);
-      v4l2_flow->AddDownFlow(decoder, 0, 0);
-    } else {
-      if (rga_need_hold_input) {
-        rga1->AddDownFlow(rga, 0, 0);
+      render->AddDownFlow(rga0, 0, 0);
+      rga1->AddDownFlow(rga, 0, 0);
+      if (decoder) {
+        decoder->AddDownFlow(rga1, 0, 0);
+        v4l2_flow->AddDownFlow(decoder, 0, 0);
+      } else {
         v4l2_flow->AddDownFlow(rga1, 0, 0);
-      } else {
-        v4l2_flow->AddDownFlow(rga, 0, 0);
       }
-      if (rga0) {
+    } else {
+      if (decoder) {
+        decoder->AddDownFlow(rga0, 0, 0);
+        if (rga_need_hold_input) {
+          decoder->AddDownFlow(rga1, 0, 0);
+          rga1->AddDownFlow(rga, 0, 0);
+        } else {
+          decoder->AddDownFlow(rga, 0, 0);
+        }
         rga0->AddDownFlow(uvc, 0, 0);
-        v4l2_flow->AddDownFlow(rga0, 0, 0);
+        v4l2_flow->AddDownFlow(decoder, 0, 0);
       } else {
-        v4l2_flow->AddDownFlow(uvc, 0, 0);
+        if (rga_need_hold_input) {
+          rga1->AddDownFlow(rga, 0, 0);
+          v4l2_flow->AddDownFlow(rga1, 0, 0);
+        } else {
+          v4l2_flow->AddDownFlow(rga, 0, 0);
+        }
+        if (rga0) {
+          rga0->AddDownFlow(uvc, 0, 0);
+          v4l2_flow->AddDownFlow(rga0, 0, 0);
+        } else {
+          v4l2_flow->AddDownFlow(uvc, 0, 0);
+        }
       }
     }
   } while (0);
@@ -809,39 +982,55 @@ int main(int argc, char **argv) {
 #endif
 
 #if 1
-  if (decoder) {
-    v4l2_flow->RemoveDownFlow(decoder);
-    v4l2_flow.reset();
-    if (rga_need_hold_input) {
+  if (render_result) {
+    if (decoder) {
+      v4l2_flow->RemoveDownFlow(decoder);
       decoder->RemoveDownFlow(rga1);
-      rga1->RemoveDownFlow(rga);
-      rga1.reset();
     } else {
-      decoder->RemoveDownFlow(rga);
-    }
-    decoder->RemoveDownFlow(rga0);
-    decoder.reset();
-    rga0->RemoveDownFlow(uvc);
-    rga0.reset();
-  } else {
-    if (rga_need_hold_input) {
       v4l2_flow->RemoveDownFlow(rga1);
-      rga1->RemoveDownFlow(rga);
-      rga1.reset();
-    } else {
-      v4l2_flow->RemoveDownFlow(rga);
     }
-    if (rga0) {
+    rga1->RemoveDownFlow(rga);
+    render->RemoveDownFlow(rga0);
+    rga0->RemoveDownFlow(uvc);
+  } else {
+    if (decoder) {
+      v4l2_flow->RemoveDownFlow(decoder);
+      v4l2_flow.reset();
+      if (rga_need_hold_input) {
+        decoder->RemoveDownFlow(rga1);
+        rga1->RemoveDownFlow(rga);
+        rga1.reset();
+      } else {
+        decoder->RemoveDownFlow(rga);
+      }
+      decoder->RemoveDownFlow(rga0);
+      decoder.reset();
       rga0->RemoveDownFlow(uvc);
-      v4l2_flow->RemoveDownFlow(rga0);
+      rga0.reset();
     } else {
-      v4l2_flow->RemoveDownFlow(uvc);
+      if (rga_need_hold_input) {
+        v4l2_flow->RemoveDownFlow(rga1);
+        rga1->RemoveDownFlow(rga);
+        rga1.reset();
+      } else {
+        v4l2_flow->RemoveDownFlow(rga);
+      }
+      if (rga0) {
+        rga0->RemoveDownFlow(uvc);
+        v4l2_flow->RemoveDownFlow(rga0);
+      } else {
+        v4l2_flow->RemoveDownFlow(uvc);
+      }
+      v4l2_flow.reset();
     }
-    v4l2_flow.reset();
   }
   rga->RemoveDownFlow(rknn);
   rga.reset();
-  rknn->RemoveDownFlow(uvc);
+  if (render)
+    rknn->RemoveDownFlow(render);
+  else
+    rknn->RemoveDownFlow(uvc);
+  render.reset();
   uvc.reset();
   rknn.reset();
 #endif
