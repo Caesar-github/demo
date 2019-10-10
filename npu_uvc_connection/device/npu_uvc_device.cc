@@ -139,6 +139,7 @@ bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
     return false;
   auto img = std::static_pointer_cast<easymedia::ImageBuffer>(img_buf);
   MppFrameFormat ifmt = ConvertToMppPixFmt(img->GetPixelFormat());
+  assert(ifmt == MPP_FMT_YUV420SP);
   // fprintf(stderr, "ifmt: %d,size: %d\n", ifmt, (int)img_buf->GetValidSize());
   if (ifmt < 0)
     return false;
@@ -613,7 +614,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (decoder) {
+  if (decoder || format != IMAGE_NV12) { // uvc only support nv12
     std::string flow_name("filter");
     std::string filter_name("rkrga");
     std::string flow_param;
@@ -788,7 +789,12 @@ int main(int argc, char **argv) {
       } else {
         v4l2_flow->AddDownFlow(rga, 0, 0);
       }
-      v4l2_flow->AddDownFlow(uvc, 0, 0);
+      if (rga0) {
+        rga0->AddDownFlow(uvc, 0, 0);
+        v4l2_flow->AddDownFlow(rga0, 0, 0);
+      } else {
+        v4l2_flow->AddDownFlow(uvc, 0, 0);
+      }
     }
   } while (0);
 
@@ -825,7 +831,12 @@ int main(int argc, char **argv) {
     } else {
       v4l2_flow->RemoveDownFlow(rga);
     }
-    v4l2_flow->RemoveDownFlow(uvc);
+    if (rga0) {
+      rga0->RemoveDownFlow(uvc);
+      v4l2_flow->RemoveDownFlow(rga0);
+    } else {
+      v4l2_flow->RemoveDownFlow(uvc);
+    }
     v4l2_flow.reset();
   }
   rga->RemoveDownFlow(rknn);
