@@ -218,8 +218,8 @@ bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
     ejd.npu_outputs_timestamp = 0;
     ejd.npu_output_size = 0;
     ejd.npu_outputs_num = 0;
-    uvc_read_camera_buffer(img_buf->GetPtr(), img_buf->GetValidSize(), &ejd,
-                           sizeof(ejd));
+    uvc_read_camera_buffer(img_buf->GetPtr(), img_buf->GetFD(), img_buf->GetValidSize(),
+			   &ejd, sizeof(ejd));
   } else {
     size_t size = 0;
     ejd.npuwh.width = flow->npu_width;
@@ -228,7 +228,7 @@ bool do_uvc(easymedia::Flow *f, easymedia::MediaBufferVector &input_vector) {
     if (new_ejd) {
       // fprintf(stderr, "set extra uvc data: %p, size: %d\n", new_ejd,
       // (int)size);
-      uvc_read_camera_buffer(img_buf->GetPtr(), img_buf->GetValidSize(),
+      uvc_read_camera_buffer(img_buf->GetPtr(), img_buf->GetFD(), img_buf->GetValidSize(),
                              new_ejd, size);
       free(new_ejd);
     } else {
