@@ -918,12 +918,12 @@ int main(int argc, char **argv) {
     std::string flow_param;
     PARAM_STRING_APPEND(flow_param, KEY_NAME, stream_name);
     std::string v4l2_param;
-    PARAM_STRING_APPEND_TO(v4l2_param, KEY_USE_LIBV4L2, 1);
+    PARAM_STRING_APPEND_TO(v4l2_param, KEY_USE_LIBV4L2, 0);
     PARAM_STRING_APPEND(v4l2_param, KEY_DEVICE, v4l2_video_path);
     PARAM_STRING_APPEND(v4l2_param, KEY_V4L2_CAP_TYPE,
-                        KEY_V4L2_C_TYPE(VIDEO_CAPTURE));
+                        KEY_V4L2_C_TYPE(VIDEO_CAPTURE_MPLANE));
     PARAM_STRING_APPEND(v4l2_param, KEY_V4L2_MEM_TYPE,
-                        KEY_V4L2_M_TYPE(MEMORY_MMAP));
+                        KEY_V4L2_M_TYPE(MEMORY_DMABUF));
     PARAM_STRING_APPEND_TO(v4l2_param, KEY_FRAMES, 8);
     PARAM_STRING_APPEND(v4l2_param, KEY_OUTPUTDATATYPE, format);
     PARAM_STRING_APPEND_TO(v4l2_param, KEY_BUFFER_WIDTH, width);
