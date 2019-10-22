@@ -41,3 +41,5 @@ target_link_libraries(${RK_NPU_UVC_TARGET} ${RK_NPU_UVC_LIBRARY})
 
 install(TARGETS ${RK_NPU_UVC_TARGET} RUNTIME DESTINATION "bin")
 install(PROGRAMS ${RK_NPU_UVC_SCRIPT} DESTINATION "bin")
+install(DIRECTORY fonts DESTINATION "/usr/lib"
+        FILES_MATCHING PATTERN "*.ttf")
