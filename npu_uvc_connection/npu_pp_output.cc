@@ -257,6 +257,13 @@ int draw_rect(SDL_Renderer *renderer, const SDL_Rect *rect, void *buffer,
     SDL_RenderGetViewport(renderer, &viewport);
     uint8_t *ptr = (uint8_t *)buffer + (rect->x + rect->y * viewport.w) * 3;
     uint8_t *p = ptr;
+
+    if (rect->x < 0 || rect->x > viewport.w ||
+	rect->y < 0 || rect->y > viewport.h ||
+	(rect->x + rect->w  >= viewport.w) ||
+	(rect->y + rect->h  >= viewport.h))
+	return 0;
+
     for (int i = 0; i < rect->w; i++) {
       *p++ = r;
       *p++ = g;
