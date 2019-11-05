@@ -19,7 +19,7 @@ if test $uvcvideo; then
 elif test $rkisp_main; then
     input=$rkisp_main
     input_format=0
-    v4l2_memory_type="dma"
+#    v4l2_memory_type="dma"
 else
     echo find non valid camera via v4l2-ctl
 fi
