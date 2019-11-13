@@ -68,7 +68,7 @@ public:
               uint32_t npu_w, uint32_t npu_h, bool render);
   virtual ~UVCJoinFlow() {
     StopAllThread();
-    uvc_video_id_exit_all();
+    uvc_control_join(UVC_CONTROL_LOOP_ONCE);
   }
   bool Init();
 
@@ -106,12 +106,8 @@ UVCJoinFlow::UVCJoinFlow(uint32_t type, const std::string &model,
 }
 
 bool UVCJoinFlow::Init() {
-  if (!check_uvc_video_id()) {
-    add_uvc_video();
-    return true;
-  }
-  fprintf(stderr, "not uvc video support\n");
-  return false;
+  uvc_control_run(UVC_CONTROL_LOOP_ONCE);
+  return true;
 }
 
 static MppFrameFormat ConvertToMppPixFmt(const PixelFormat &fmt) {
