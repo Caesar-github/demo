@@ -22,9 +22,6 @@
 // this file run on 1808 with npu
 // data path: camera (-> mpp) -> rga -> npu ->uvc
 
-#ifdef NDEBUG
-#undef NDEBUG
-#endif
 #ifndef DEBUG
 #define DEBUG
 #endif
