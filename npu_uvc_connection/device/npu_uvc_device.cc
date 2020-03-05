@@ -137,6 +137,7 @@ serialize(struct extra_jpeg_data &ejd,
   struct extra_jpeg_data *new_ejd = nullptr;
   switch (ejd.npu_output_type) {
   case TYPE_RK_NPU_OUTPUT: {
+    //the output tensor number
     size_t num = npu_output_buf->GetValidSize();
     ejd.npu_outputs_num = num;
     rknn_output *outputs = (rknn_output *)npu_output_buf->GetPtr();
@@ -149,7 +150,10 @@ serialize(struct extra_jpeg_data &ejd,
     if (!new_ejd)
       return nullptr;
     *new_ejd = ejd;
+
+#if 0
     uint32_t pos = 0;
+    printf("%s, %d, struct size %d \n",__FUNCTION__,__LINE__, sizeof(struct aligned_npu_output));
     for (size_t i = 0; i < num; i++) {
       struct aligned_npu_output *an =
           (struct aligned_npu_output *)(new_ejd->outputs + pos);
@@ -160,7 +164,10 @@ serialize(struct extra_jpeg_data &ejd,
       memcpy(an->buf, outputs[i].buf, outputs[i].size);
       pos += (sizeof(*an) + outputs[i].size);
     }
-  } break;
+#endif
+
+   }break;
+
   case TYPE_RK_ROCKX_OUTPUT: {
     size_t num = npu_output_buf->GetValidSize();
     ejd.npu_outputs_num = num;
@@ -445,7 +452,7 @@ public:
       : npu_output_type(type), model_identifier(model), npu_width(npu_w),
         npu_height(npu_h) {
     easymedia::SlotMap sm;
-    sm.thread_model = easymedia::Model::ASYNCATOMIC;
+    sm.thread_model = easymedia::Model::ASYNCCOMMON;
     sm.mode_when_full = easymedia::InputMode::DROPFRONT;
     sm.input_slots.push_back(0);
     sm.input_maxcachenum.push_back(1);
@@ -494,13 +501,18 @@ bool do_sdl_draw(easymedia::Flow *f,
            flow->model_identifier.c_str());
   ejd.npuwh.width = flow->npu_width;
   ejd.npuwh.height = flow->npu_height;
+
   new_ejd = serialize(ejd, npu_output_buf, size);
   if (!new_ejd)
     goto out;
+
   SDL_LogSetPriority(SDL_LOG_CATEGORY_VIDEO, SDL_LOG_PRIORITY_VERBOSE);
   SDL_LogSetPriority(SDL_LOG_CATEGORY_RENDER, SDL_LOG_PRIORITY_VERBOSE);
-  surface = SDL_CreateRGBSurfaceWithFormatFrom(img->GetPtr(), img->GetWidth(),
-                                               img->GetHeight(), 24,
+  printf("SDL_CreateRGBSurfaceWithFormatFrom width %d , height %d \n", img->GetWidth(), img->GetHeight());
+  surface = SDL_CreateRGBSurfaceWithFormatFrom(img->GetPtr(),
+                                               img->GetWidth(),
+                                               img->GetHeight(),
+                                               24,
                                                img->GetWidth() * 3, sdl_fmt);
   if (!surface) {
     fprintf(stderr, "SDL_CreateRGBSurfaceWithFormatFrom failed at line %d\n",
@@ -513,17 +525,15 @@ bool do_sdl_draw(easymedia::Flow *f,
     goto err;
   }
   do {
-    NPUPostProcessOutput npo(new_ejd);
+    NPUPostProcessOutput npo(new_ejd, (rknn_output *)npu_output_buf->GetPtr());
     (npo.pp_func)(renderer, dst_rect, dst_rect, 0, &npo, img->GetPtr(),
                   sdl_fmt);
   } while (0);
   SDL_RenderPresent(renderer);
-
 out:
   npu_output_buf->GetRelatedSPtrs().clear();
   img->SetRelatedSPtr(npu_output_buf, 0);
   ret = flow->SetOutput(img, 0);
-
 err:
   if (new_ejd)
     free(new_ejd);
@@ -662,7 +672,8 @@ int main(int argc, char **argv) {
   std::string model_name;
   bool need_3a = false;
   bool render_result = false;
-
+  bool with_nn = false;
+  std::string output_path{"/userdata/output.yuv"};
   opterr = 1;
   while ((c = getopt(argc, argv, optstr)) != -1) {
     switch (c) {
@@ -727,6 +738,7 @@ int main(int argc, char **argv) {
   // rga do convert
   std::shared_ptr<easymedia::Flow> rga0;
   if (format == IMAGE_JPEG || format == VIDEO_H264) {
+    printf("******format is JPEG or H264, decode enable******\n");
     std::string flow_name("video_dec");
     std::string codec_name("rkmpp");
     std::string flow_param;
@@ -748,6 +760,7 @@ int main(int argc, char **argv) {
 
   // uvc only support nv12
   if (decoder || format != IMAGE_NV12 || render_result) {
+    printf( "*****decoder || format != IMAGE_NV12 || render_result in***** \n");
     std::string flow_name("filter");
     std::string filter_name("rkrga");
     std::string flow_param;
@@ -772,19 +785,34 @@ int main(int argc, char **argv) {
       (model_name == "rockx_face_gender_age") || render_result;
   std::shared_ptr<easymedia::Flow> rga1;
   if (rga_need_hold_input) {
+    printf("**************rga_need_hold_input*********************** \n");
     std::string flow_name("filter");
-    std::string filter_name("rkrga");
-    std::string flow_param;
-    PARAM_STRING_APPEND(flow_param, KEY_NAME, filter_name);
+    std::string flow_param("");
+    PARAM_STRING_APPEND(flow_param, KEY_NAME, "rkrga");
     PARAM_STRING_APPEND(flow_param, KEK_THREAD_SYNC_MODEL, KEY_ASYNCCOMMON);
-    PixelFormat rga_out_pix_fmt = StringToPixFmt(IMAGE_RGB888);
-    ImageInfo out_img_info = {rga_out_pix_fmt, 0, 0, 0, 0};
-    flow_param.append(easymedia::to_param_string(out_img_info, false));
-    std::string rga_param;
-    std::vector<ImageRect> v = {{0, 0, 0, 0}, {0, 0, 0, 0}};
-    PARAM_STRING_APPEND(rga_param, KEY_BUFFER_RECT,
-                        easymedia::TwoImageRectToString(v));
-    rga1 = create_flow(flow_name, flow_param, rga_param);
+    //Set output buffer type and size.
+    PARAM_STRING_APPEND(flow_param, KEY_OUTPUTDATATYPE, IMAGE_RGB888);
+    PARAM_STRING_APPEND_TO(flow_param, KEY_BUFFER_WIDTH, width);
+    PARAM_STRING_APPEND_TO(flow_param, KEY_BUFFER_HEIGHT, height);
+    PARAM_STRING_APPEND_TO(flow_param, KEY_BUFFER_VIR_WIDTH, width);
+    PARAM_STRING_APPEND_TO(flow_param, KEY_BUFFER_VIR_HEIGHT, height);
+    
+    if (rga_need_hold_input)
+      PARAM_STRING_APPEND_TO(flow_param, KEY_OUTPUT_HOLD_INPUT,
+                             (int)easymedia::HoldInputMode::HOLD_INPUT);
+    
+    std::string filter_param("");
+    ImageRect src_rect = {0, 0, width, height};
+    ImageRect dst_rect = {0, 0, width, height};
+    std::vector<ImageRect> rect_vect;
+    rect_vect.push_back(src_rect);
+    rect_vect.push_back(dst_rect);
+
+    PARAM_STRING_APPEND(filter_param, KEY_BUFFER_RECT,
+                        easymedia::TwoImageRectToString(rect_vect).c_str());
+    PARAM_STRING_APPEND_TO(filter_param, KEY_BUFFER_ROTATE, 0);
+//这里最后出去的数据实际是BGR888
+    rga1 = create_flow(flow_name, flow_param, filter_param);
     if (!rga1) {
       assert(0);
       return -1;
@@ -793,25 +821,32 @@ int main(int argc, char **argv) {
   std::shared_ptr<easymedia::Flow> rga;
   do {
     std::string flow_name("filter");
-    std::string filter_name("rkrga");
-    std::string flow_param;
-    PARAM_STRING_APPEND(flow_param, KEY_NAME, filter_name);
+    std::string flow_param("");
+    PARAM_STRING_APPEND(flow_param, KEY_NAME, "rkrga");
     PARAM_STRING_APPEND(flow_param, KEK_THREAD_SYNC_MODEL, KEY_ASYNCCOMMON);
-    PixelFormat rga_out_pix_fmt = StringToPixFmt(IMAGE_RGB888);
-    ImageInfo out_img_info = {rga_out_pix_fmt, npu_width, npu_height, npu_width,
-                              npu_height};
-    // if (!decoder && !rga_need_hold_input)
-    //   PARAM_STRING_APPEND(flow_param, KEY_INPUTDATATYPE, format);
-    flow_param.append(easymedia::to_param_string(out_img_info, false));
+    //Set output buffer type and size.
+    PARAM_STRING_APPEND(flow_param, KEY_OUTPUTDATATYPE, IMAGE_RGB888);
+    PARAM_STRING_APPEND_TO(flow_param, KEY_BUFFER_WIDTH, npu_width);
+    PARAM_STRING_APPEND_TO(flow_param, KEY_BUFFER_HEIGHT, npu_height);
+    PARAM_STRING_APPEND_TO(flow_param, KEY_BUFFER_VIR_WIDTH, npu_width);
+    PARAM_STRING_APPEND_TO(flow_param, KEY_BUFFER_VIR_HEIGHT, npu_height);
+    
     if (rga_need_hold_input)
       PARAM_STRING_APPEND_TO(flow_param, KEY_OUTPUT_HOLD_INPUT,
                              (int)easymedia::HoldInputMode::HOLD_INPUT);
-    std::string rga_param;
-    std::vector<ImageRect> v = {{0, 0, width, height},
-                                {0, 0, npu_width, npu_height}};
-    PARAM_STRING_APPEND(rga_param, KEY_BUFFER_RECT,
-                        easymedia::TwoImageRectToString(v));
-    rga = create_flow(flow_name, flow_param, rga_param);
+    
+    std::string filter_param("");
+    ImageRect src_rect = {0, 0, width, height};
+    ImageRect dst_rect = {0, 0, npu_width, npu_height};
+    std::vector<ImageRect> rect_vect;
+    rect_vect.push_back(src_rect);
+    rect_vect.push_back(dst_rect);
+
+    PARAM_STRING_APPEND(filter_param, KEY_BUFFER_RECT,
+                        easymedia::TwoImageRectToString(rect_vect).c_str());
+    PARAM_STRING_APPEND_TO(filter_param, KEY_BUFFER_ROTATE, 0);
+
+    rga = create_flow(flow_name, flow_param, filter_param);
     if (!rga) {
       assert(0);
       return -1;
@@ -903,14 +938,42 @@ int main(int argc, char **argv) {
   else
     rknn->AddDownFlow(uvc, 0, 1);
 
+  //add write flow for debug
+  std::shared_ptr<easymedia::Flow> video_save_flow;
+  std::string flow_name = "file_write_flow";
+  std::string flow_param = "";
+  PARAM_STRING_APPEND(flow_param, KEY_PATH, output_path.c_str());
+  PARAM_STRING_APPEND(flow_param, KEY_OPEN_MODE, "w+"); // read and close-on-exec
+  printf("\n#FileWrite:\n%s\n", flow_param.c_str());
+  video_save_flow = easymedia::REFLECTOR(Flow)::Create<easymedia::Flow>(
+                               flow_name.c_str(), flow_param.c_str());
+  if (!video_save_flow) {
+      fprintf(stderr, "Create flow %s failed\n", flow_name.c_str());
+      exit(EXIT_FAILURE);
+  }
+
   // finally, create v4l2 flow
   std::shared_ptr<easymedia::Flow> v4l2_flow;
   do {
     std::string flow_name("source_stream");
-    std::string stream_name("v4l2_capture_stream");
-    std::string flow_param;
-    PARAM_STRING_APPEND(flow_param, KEY_NAME, stream_name);
-    std::string v4l2_param;
+    std::string flow_param("");
+    PARAM_STRING_APPEND(flow_param, KEY_NAME, "v4l2_capture_stream");
+    PARAM_STRING_APPEND(flow_param, KEK_THREAD_SYNC_MODEL, KEY_ASYNCCOMMON);
+    //PARAM_STRING_APPEND(flow_param, KEK_THREAD_SYNC_MODEL, KEY_SYNC);
+    PARAM_STRING_APPEND(flow_param, KEK_INPUT_MODEL, KEY_DROPFRONT);
+    PARAM_STRING_APPEND_TO(flow_param, KEY_INPUT_CACHE_NUM, 5);
+
+    std::string v4l2_param("");
+    PARAM_STRING_APPEND_TO(v4l2_param, KEY_USE_LIBV4L2, 1);
+    PARAM_STRING_APPEND(v4l2_param, KEY_DEVICE, v4l2_video_path);
+    PARAM_STRING_APPEND(v4l2_param, KEY_V4L2_CAP_TYPE, KEY_V4L2_C_TYPE(VIDEO_CAPTURE));
+    PARAM_STRING_APPEND(v4l2_param, KEY_V4L2_MEM_TYPE, KEY_V4L2_M_TYPE(MEMORY_DMABUF));
+    PARAM_STRING_APPEND_TO(v4l2_param, KEY_FRAMES, 4);
+    PARAM_STRING_APPEND(v4l2_param, KEY_OUTPUTDATATYPE, format);
+    PARAM_STRING_APPEND_TO(v4l2_param, KEY_BUFFER_WIDTH, width);
+    PARAM_STRING_APPEND_TO(v4l2_param, KEY_BUFFER_HEIGHT, height);
+
+#if 0
     PARAM_STRING_APPEND_TO(v4l2_param, KEY_USE_LIBV4L2, 0);
     PARAM_STRING_APPEND(v4l2_param, KEY_DEVICE, v4l2_video_path);
     PARAM_STRING_APPEND(v4l2_param, KEY_V4L2_CAP_TYPE,
@@ -921,6 +984,7 @@ int main(int argc, char **argv) {
     PARAM_STRING_APPEND(v4l2_param, KEY_OUTPUTDATATYPE, format);
     PARAM_STRING_APPEND_TO(v4l2_param, KEY_BUFFER_WIDTH, width);
     PARAM_STRING_APPEND_TO(v4l2_param, KEY_BUFFER_HEIGHT, height);
+#endif
     v4l2_flow = create_flow(flow_name, flow_param, v4l2_param);
     if (!v4l2_flow) {
       assert(0);

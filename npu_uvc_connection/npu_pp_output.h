@@ -21,10 +21,10 @@
 
 #ifndef NPU_UVC_PP_OUTPUT_
 #define NPU_UVC_PP_OUTPUT_
-
 #include "npu_uvc_shared.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <rknn_runtime.h>
 
 class NPUPostProcessOutput;
 typedef bool (*PostDrawFunc)(SDL_Renderer *renderer,
@@ -36,7 +36,7 @@ SDL_Rect transform(const SDL_Rect &src_rect, const SDL_Rect &coor_rect,
                    int rotate);
 class NPUPostProcessOutput {
 public:
-  NPUPostProcessOutput(struct extra_jpeg_data *input);
+  NPUPostProcessOutput(struct extra_jpeg_data *input,rknn_output *output);
   ~NPUPostProcessOutput() {
     if (pp_output)
       free(pp_output);

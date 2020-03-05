@@ -22,26 +22,30 @@
 #include "npu_pp_output.h"
 
 #include <assert.h>
+#include <rknn_runtime.h>
 
 #include "rknn_ssd.h"
 #include "rockx_draw.h"
 
-NPUPostProcessOutput::NPUPostProcessOutput(struct extra_jpeg_data *ejd)
+NPUPostProcessOutput::NPUPostProcessOutput(struct extra_jpeg_data *ejd, rknn_output *outputs)
     : pp_output(nullptr), count(ejd->npu_outputs_num), pp_func(nullptr),
       npuwh(ejd->npuwh) {
   switch (ejd->npu_output_type) {
   case TYPE_RK_NPU_OUTPUT: {
+ #if 0
     size_t pos = 0;
     struct aligned_npu_output ano[ejd->npu_outputs_num];
     uint8_t *bufs[ejd->npu_outputs_num] = {nullptr};
     for (size_t i = 0; i < ejd->npu_outputs_num; i++) {
       auto pano = (struct aligned_npu_output *)(ejd->outputs + pos);
       ano[i] = *pano;
-      pos += sizeof(*pano);
       bufs[i] = ejd->outputs + pos;
+      pos += sizeof(*pano);
       pos += pano->size;
     }
     assert(pos == ejd->npu_output_size);
+#endif
+
     if (!strcmp((const char *)ejd->model_identifier, "rknn_ssd")) {
       pp_output = malloc(sizeof(NPU_UVC_SSD_DEMO::detect_result_group_t));
       if (!pp_output) {
@@ -50,7 +54,7 @@ NPUPostProcessOutput::NPUPostProcessOutput(struct extra_jpeg_data *ejd)
       }
       auto group = (NPU_UVC_SSD_DEMO::detect_result_group_t *)pp_output;
       int ret = NPU_UVC_SSD_DEMO::postProcessSSD(
-          (float *)(bufs[1]), (float *)(bufs[0]), ejd->npuwh.width,
+          (float *)(outputs[1].buf), (float *)(outputs[0].buf), ejd->npuwh.width,
           ejd->npuwh.height, group);
       if (ret) {
         fprintf(stderr, "Fail to postProcessSSD\n");
