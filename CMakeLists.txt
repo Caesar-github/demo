@@ -203,3 +203,8 @@ option(MODULE_RK_NPU_UVC_DEMO "compile: npu uvc demo " OFF)
 if(MODULE_RK_NPU_UVC_DEMO)
 add_subdirectory(npu_uvc_connection)
 endif()
+
+option(MODULE_RK_RMSL "compile: rmsl demo" OFF)
+if(MODULE_RK_RMSL_DEMO)
+add_subdirectory(rmsl)
+endif()
