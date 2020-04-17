@@ -36,7 +36,7 @@ SDL_Rect transform(const SDL_Rect &src_rect, const SDL_Rect &coor_rect,
                    int rotate);
 class NPUPostProcessOutput {
 public:
-  NPUPostProcessOutput(struct extra_jpeg_data *input,rknn_output *output);
+  NPUPostProcessOutput(struct extra_jpeg_data *input, rknn_output *output);
   ~NPUPostProcessOutput() {
     if (pp_output)
       free(pp_output);

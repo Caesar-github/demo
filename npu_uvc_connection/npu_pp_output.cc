@@ -27,12 +27,13 @@
 #include "rknn_ssd.h"
 #include "rockx_draw.h"
 
-NPUPostProcessOutput::NPUPostProcessOutput(struct extra_jpeg_data *ejd, rknn_output *outputs)
+NPUPostProcessOutput::NPUPostProcessOutput(struct extra_jpeg_data *ejd,
+                                           rknn_output *outputs)
     : pp_output(nullptr), count(ejd->npu_outputs_num), pp_func(nullptr),
       npuwh(ejd->npuwh) {
   switch (ejd->npu_output_type) {
   case TYPE_RK_NPU_OUTPUT: {
- #if 0
+#if 0
     size_t pos = 0;
     struct aligned_npu_output ano[ejd->npu_outputs_num];
     uint8_t *bufs[ejd->npu_outputs_num] = {nullptr};
@@ -54,8 +55,8 @@ NPUPostProcessOutput::NPUPostProcessOutput(struct extra_jpeg_data *ejd, rknn_out
       }
       auto group = (NPU_UVC_SSD_DEMO::detect_result_group_t *)pp_output;
       int ret = NPU_UVC_SSD_DEMO::postProcessSSD(
-          (float *)(outputs[1].buf), (float *)(outputs[0].buf), ejd->npuwh.width,
-          ejd->npuwh.height, group);
+          (float *)(outputs[1].buf), (float *)(outputs[0].buf),
+          ejd->npuwh.width, ejd->npuwh.height, group);
       if (ret) {
         fprintf(stderr, "Fail to postProcessSSD\n");
         goto fail;
@@ -262,11 +263,10 @@ int draw_rect(SDL_Renderer *renderer, const SDL_Rect *rect, void *buffer,
     uint8_t *ptr = (uint8_t *)buffer + (rect->x + rect->y * viewport.w) * 3;
     uint8_t *p = ptr;
 
-    if (rect->x < 0 || rect->x > viewport.w ||
-	rect->y < 0 || rect->y > viewport.h ||
-	(rect->x + rect->w  >= viewport.w) ||
-	(rect->y + rect->h  >= viewport.h))
-	return 0;
+    if (rect->x < 0 || rect->x > viewport.w || rect->y < 0 ||
+        rect->y > viewport.h || (rect->x + rect->w >= viewport.w) ||
+        (rect->y + rect->h >= viewport.h))
+      return 0;
 
     for (int i = 0; i < rect->w; i++) {
       *p++ = r;
