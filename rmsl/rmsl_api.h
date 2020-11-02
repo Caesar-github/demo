@@ -42,7 +42,7 @@ struct rmsl_pc {
  * to convert.
  */
 int rmsl_get_point_cloud_depth(const uint16_t *pIn, struct rmsl_pc *pc_out,
-                                uint16_t *depth_out, int width, int height);
+                               uint16_t *depth_out, int width, int height);
 #ifdef __cplusplus
 }
 #endif

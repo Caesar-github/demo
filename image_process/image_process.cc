@@ -48,7 +48,7 @@
 #define NPU_PIECE_WIDTH 300
 #define NPU_PIECE_HEIGHT 300
 #define NPU_MODEL_PATH "/userdata/ssd_inception_v2.rknn"
-#define FONT_FILE_PATH "/usr/lib/fonts/DejaVuSansMono.ttf"
+#define FONT_FILE_PATH "/usr/share/fonts/dejavu/DejaVuSansMono.ttf"
 #define LOGO_FILE_PATH "/userdata/logo.png"
 
 enum class Format { NV12, NV16, RGB888, RGBX, YUYV, YU12, RGB565 };

@@ -122,7 +122,7 @@ SDL_Rect transform(const SDL_Rect &src_rect, const SDL_Rect &coor_rect,
   return rect;
 }
 
-#define FONT_FILE_PATH "/usr/lib/fonts/DejaVuSansMono.ttf"
+#define FONT_FILE_PATH "/usr/share/fonts/dejavu/DejaVuSansMono.ttf"
 static SDL_Color white = {0xFF, 0xFF, 0xFF, 0x00};
 SDL_Color red = {0x00, 0x00, 0xFF, 0xFF};
 // static SDL_Color title_color = {0x06, 0xEB, 0xFF, 0xFF};
