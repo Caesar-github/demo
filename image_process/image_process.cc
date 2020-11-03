@@ -715,7 +715,7 @@ static bool AllocJoinBO(int drmfd, RockchipRga &rga, JoinBO *jb, int w, int h) {
   jb->bo.fd = -1;
   jb->bo.ptr = NULL;
   bo.fd = drmfd;
-  if (rga.RkRgaAllocBuffer(drmfd, &bo, w, h, 32)) {
+  if (rga.RkRgaAllocBuffer(drmfd, &bo, w, h, 32, 0)) {
     av_log(NULL, AV_LOG_FATAL, "Fail to alloc large bo memory\n");
     return false;
   }
