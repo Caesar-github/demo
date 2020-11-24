@@ -33,6 +33,7 @@
 #include <gflags/gflags.h>
 
 #include <rga/RockchipRga.h>
+#include <rga/RgaApi.h>
 
 #if RKNNCASCADE
 #include <rknn_cascade/RknnCascade.h>
@@ -1333,10 +1334,13 @@ Join::~Join() {
 void Join::set_frame_rate(double frame_rate) { fps = frame_rate; }
 
 bool Join::Prepare(int w, int h, int slicenum, int buffernum) {
-  if (!rga.RkRgaIsReady()) {
-    av_log(NULL, AV_LOG_FATAL, "rga is not ready, check it!\n");
-    return false;
-  }
+  int ret;
+
+  ret = c_RkRgaInit();
+  if (ret) {
+	  av_log(NULL, AV_LOG_FATAL, "rga is not ready, check it!\n");
+	  return false;
+   }
   if (w % 16 != 0)
     av_log(NULL, AV_LOG_WARNING, "warning: join width does not align to 16\n");
   if (h % 16 != 0)
@@ -2690,8 +2694,13 @@ static const float inv255f = 1.0f / 255.0f;
 
 bool SDLDisplayLeaf::SDLPrepare() {
 #if SDL_RGA
-  if (!rga.RkRgaIsReady())
-    return false;
+  int ret;
+
+  ret = c_RkRgaInit();
+  if (ret) {
+	  av_log(NULL, AV_LOG_FATAL, "rga is not ready, check it!\n");
+	  return false;
+  }
 #endif
 
   SDL_LogSetPriority(SDL_LOG_CATEGORY_VIDEO, SDL_LOG_PRIORITY_VERBOSE);
